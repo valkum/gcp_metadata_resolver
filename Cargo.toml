@@ -1,0 +1,26 @@
+[package]
+name = "gcp_metadata_resolver"
+version = "0.1.0"
+edition = "2024"
+description = "Helper utility to identify the Monitored Resource inside Google Cloud Platform"
+repository = "https://github.com/valkum/gcp_metadata_resolver"
+license = "MIT OR Apache-2.0"
+
+
+[dependencies]
+hyper = { version = "1", default-features = false, features = [
+    "client",
+    "http1",
+] }
+hyper-util = { version = "0.1", features = [
+    "client",
+    "client-legacy",
+    "http1",
+] }
+http-body-util = "0.1"
+thiserror = "2"
+# opentelemetry-stackdriver = { version = "0.25" }
+opentelemetry-stackdriver = { git = "https://github.com/valkum/opentelemetry-rust-contrib", rev = "fb11fbd11deedf963330efb8094c6852b4c023d5" }
+tokio = { version = "1", default-features = false, features = ["macros"] }
+tracing = "0.1"
+async-once-cell = "0.5"
