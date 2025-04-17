@@ -9,13 +9,15 @@ jobs:
 
   publish:
     name: Publishing to GitHub Releases
-    runs-on: ${{ matrix.job.os }}
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - name: Releasing assets
         uses: softprops/action-gh-release@v2
         with:
+          name: ${{ github.ref_name}}
+          generate_release_notes: true
           files: assets/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
