@@ -302,7 +302,7 @@ dependencies = [
 
 [[package]]
 name = "gcp_metadata_resolver"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-once-cell",
  "http-body-util",
