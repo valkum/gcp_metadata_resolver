@@ -19,8 +19,7 @@ hyper-util = { version = "0.1", features = [
 ] }
 http-body-util = "0.1"
 thiserror = "2"
-# opentelemetry-stackdriver = { version = "0.25" }
-opentelemetry-stackdriver = { git = "https://github.com/valkum/opentelemetry-rust-contrib", rev = "fb11fbd11deedf963330efb8094c6852b4c023d5" }
+opentelemetry-stackdriver = { version = "0.26" }
 tokio = { version = "1", default-features = false, features = ["macros"] }
 tracing = "0.1"
 async-once-cell = "0.5"
