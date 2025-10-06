@@ -1,6 +1,6 @@
 [package]
 name = "gcp_metadata_resolver"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "Helper utility to identify the Monitored Resource inside Google Cloud Platform"
 repository = "https://github.com/valkum/gcp_metadata_resolver"
