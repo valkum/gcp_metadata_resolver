@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/valkum/gcp_metadata_resolver/compare/v0.3.0...v0.3.1) - 2026-02-19
+
+### Fixed
+
+- fix cloud run service mistaken for cloud run function
+
+### Other
+
+- bump and pin github actions
+- add changelog for pr
+- make testable and add tests
+- Bump actions/checkout from 5 to 6
+
 ### Fixed
 
 - Fixed identification of Cloud Run services (#19)
