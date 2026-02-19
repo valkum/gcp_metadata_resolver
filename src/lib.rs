@@ -158,25 +158,17 @@ impl ResourceAttributesGetter {
     }
 
     fn is_cloud_function(&self) -> bool {
-        let target = env::var("FUNCTION_TARGET").unwrap_or_default();
-        let signature = env::var("FUNCTION_SIGNATURE_TYPE").unwrap_or_default();
-        let service = env::var("K_SERVICE").unwrap_or_default();
-        !target.is_empty() && !signature.is_empty() && !service.is_empty()
+        env::var("FUNCTION_TARGET").is_ok_and(|v| !v.is_empty())
     }
 
     fn is_cloud_run_service(&self) -> bool {
-        let config = env::var("K_CONFIGURATION").unwrap_or_default();
-        let service = env::var("K_SERVICE").unwrap_or_default();
-        let revision = env::var("K_REVISION").unwrap_or_default();
-        !config.is_empty() && !service.is_empty() && !revision.is_empty()
+        let has_config = env::var("K_CONFIGURATION").is_ok_and(|v| !v.is_empty());
+        let has_function_target = env::var("FUNCTION_TARGET").is_ok_and(|v| !v.is_empty());
+        has_config && !has_function_target
     }
 
     fn is_cloud_run_job(&self) -> bool {
-        let job = env::var("CLOUD_RUN_JOB").unwrap_or_default();
-        let exection = env::var("CLOUD_RUN_EXECUTION").unwrap_or_default();
-        let index = env::var("CLOUD_RUN_TASK_INDEX").unwrap_or_default();
-        let attempt = env::var("CLOUD_RUN_TASK_ATTEMPT").unwrap_or_default();
-        !job.is_empty() && !exection.is_empty() && !index.is_empty() && !attempt.is_empty()
+        env::var("CLOUD_RUN_JOB").is_ok_and(|v| !v.is_empty())
     }
 
     async fn is_kubernetes_engine(&self) -> bool {
@@ -246,7 +238,7 @@ async fn detect_cloud_function_resource(
         return None;
     }
     let region = getter.metadata_region().await;
-    let function_name = env::var("FUNCTION_NAME").ok();
+    let function_name = env::var("K_SERVICE").ok();
     Some(MonitoredResource::CloudFunction {
         project_id,
         region,
@@ -261,12 +253,16 @@ async fn detect_cloud_run_service_resource(
     if project_id.is_empty() {
         return None;
     }
-    let region = getter.metadata_region().await;
-    let function_name = env::var("FUNCTION_NAME").ok();
-    Some(MonitoredResource::CloudFunction {
+    let location = getter.metadata_region().await;
+    let service_name = env::var("K_SERVICE").ok();
+    let revision_name = env::var("K_REVISION").ok();
+    let configuration_name = env::var("K_CONFIGURATION").ok();
+    Some(MonitoredResource::CloudRunRevision {
         project_id,
-        region,
-        function_name,
+        location,
+        service_name,
+        revision_name,
+        configuration_name,
     })
 }
 
@@ -277,12 +273,12 @@ async fn detect_cloud_run_job_resource(
     if project_id.is_empty() {
         return None;
     }
-    let region = getter.metadata_region().await;
-    let function_name = env::var("FUNCTION_NAME").ok();
-    Some(MonitoredResource::CloudFunction {
+    let location = getter.metadata_region().await;
+    let job_name = env::var("CLOUD_RUN_JOB").ok();
+    Some(MonitoredResource::CloudRunJob {
         project_id,
-        region,
-        function_name,
+        location,
+        job_name,
     })
 }
 
