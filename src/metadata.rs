@@ -6,28 +6,41 @@ use hyper::{StatusCode, body::Bytes};
 use hyper_util::client::legacy::{Client, connect::HttpConnector};
 use thiserror::Error;
 
-pub struct MetadataClient {
+/// A client for the GCP metadata service.
+#[allow(async_fn_in_trait)]
+pub trait MetadataClient {
+    /// Returns a value from the metadata service as well as the associated ETag.
+    async fn resolve_etag(&self, suffix: &str) -> Result<(String, Option<String>), Error>;
+
+    /// Returns a value from the metadata service.
+    async fn resolve(&self, suffix: &str) -> Result<String, Error>;
+}
+
+pub struct HttpMetadataClient {
     client: Client<HttpConnector, Full<Bytes>>,
 }
 
-impl MetadataClient {
+impl HttpMetadataClient {
     pub fn new(client: Client<HttpConnector, Full<Bytes>>) -> Self {
         Self { client }
     }
+}
 
+impl MetadataClient for HttpMetadataClient {
     /// Returns a value from the metadata service as well as the associated ETag.
     ///
     /// Follows the go SDK implementation.
-    pub async fn resolve_etag(&self, suffix: &str) -> Result<(String, Option<String>), Error> {
+    async fn resolve_etag(&self, suffix: &str) -> Result<(String, Option<String>), Error> {
         // Using a fixed IP makes it very difficult to spoof the metadata service in
         // a container, which is an important use-case for local testing of cloud
         // deployments. To enable spoofing of the metadata service, the environment
         // variable GCE_METADATA_HOST is first inspected to decide where metadata
         // requests shall go.
-        let host = std::env::var(METADATA_HOST_ENV).unwrap_or_else(|_| {
+        let possible_host_override = std::env::var(METADATA_HOST_ENV);
+        let host = possible_host_override.as_deref().unwrap_or({
             // Using 169.254.169.254 instead of "metadata" or "metadata.google.internal" here because
             // we can't know how the user's network is configured.
-            METADATA_IP.to_string()
+            METADATA_IP
         });
 
         let suffix = suffix.trim_end_matches('/');
@@ -60,7 +73,7 @@ impl MetadataClient {
         Ok((body, etag))
     }
 
-    pub async fn resolve(&self, suffix: &str) -> Result<String, Error> {
+    async fn resolve(&self, suffix: &str) -> Result<String, Error> {
         let (body, _) = self.resolve_etag(suffix).await?;
         Ok(body)
     }
