@@ -7,13 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/valkum/gcp_metadata_resolver/compare/v0.3.0...v0.3.1) - 2026-02-19
+
 ### Fixed
 
 - Fixed identification of Cloud Run services (#19)
 
 ### Other
 
-- Bump and pin multiple GH actions
+- Pin GitHub actions
+- Bump actions/checkout from 5 to 6
 
 ## [0.3.0](https://github.com/valkum/gcp_metadata_resolver/compare/v0.2.0...v0.3.0) - 2025-10-06
 
