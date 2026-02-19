@@ -5,16 +5,17 @@
 //!
 //! Having this standalone makes it easier to test out different implementations before trying
 //! to merge them into `opentelemetry-stackdriver`.
-use std::{env, fs::File, io::Read};
+use std::env::{self, VarError};
+use std::fs::File;
+use std::io::Read;
 
 use async_once_cell::OnceCell;
 use hyper_util::{client::legacy::Client, rt::TokioExecutor};
-use metadata::MetadataClient;
-
 use opentelemetry_stackdriver::MonitoredResource;
 use thiserror::Error;
 
 mod metadata;
+use metadata::{HttpMetadataClient, MetadataClient};
 
 static DETECTED_RESOURCE: OnceCell<MonitoredResource> = OnceCell::new();
 
@@ -26,7 +27,9 @@ static DETECTED_RESOURCE: OnceCell<MonitoredResource> = OnceCell::new();
 /// # Errors
 /// This will return an error if the resource could not be detected.
 pub async fn detected_resource() -> Result<&'static MonitoredResource, DetectError> {
-    DETECTED_RESOURCE.get_or_try_init(detect_resource()).await
+    DETECTED_RESOURCE
+        .get_or_try_init(detect_resource(ResourceAttributesGetter::default()))
+        .await
 }
 
 #[derive(Debug, Error)]
@@ -37,9 +40,10 @@ pub enum DetectError {
     DetectionFailed,
 }
 
-async fn detect_resource() -> Result<MonitoredResource, DetectError> {
-    let getter = ResourceAttributesGetter::default();
-
+/// Detect the environment using the given getter
+async fn detect_resource<C: MetadataClient>(
+    getter: ResourceAttributesGetter<C>,
+) -> Result<MonitoredResource, DetectError> {
     if getter.is_metadata_active().await {
         // Fast path
         match system_product_name().as_deref() {
@@ -111,11 +115,16 @@ fn system_product_name() -> Option<String> {
     }
 }
 
-struct ResourceAttributesGetter {
-    metadata_client: MetadataClient,
+struct ResourceAttributesGetter<C> {
+    /// A generic metadata client.
+    ///
+    /// You normally would use HttpMetadataClient.
+    metadata_client: C,
+    /// This is used to allow testing of environment variable getters.
+    env_getter: fn(&str) -> Result<String, VarError>,
 }
 
-impl ResourceAttributesGetter {
+impl<C: MetadataClient> ResourceAttributesGetter<C> {
     async fn metadata(&self, path: &str) -> Option<String> {
         match self.metadata_client.resolve(path).await {
             Ok(body) => Some(body.trim().to_string()),
@@ -151,24 +160,24 @@ impl ResourceAttributesGetter {
     }
 
     fn is_app_engine(&self) -> bool {
-        let service = env::var("GAE_SERVICE").unwrap_or_default();
-        let version = env::var("GAE_VERSION").unwrap_or_default();
-        let instance = env::var("GAE_INSTANCE").unwrap_or_default();
+        let service = (self.env_getter)("GAE_SERVICE").unwrap_or_default();
+        let version = (self.env_getter)("GAE_VERSION").unwrap_or_default();
+        let instance = (self.env_getter)("GAE_INSTANCE").unwrap_or_default();
         !service.is_empty() && !version.is_empty() && !instance.is_empty()
     }
 
     fn is_cloud_function(&self) -> bool {
-        env::var("FUNCTION_TARGET").is_ok_and(|v| !v.is_empty())
+        (self.env_getter)("FUNCTION_TARGET").is_ok_and(|v| !v.is_empty())
     }
 
     fn is_cloud_run_service(&self) -> bool {
-        let has_config = env::var("K_CONFIGURATION").is_ok_and(|v| !v.is_empty());
-        let has_function_target = env::var("FUNCTION_TARGET").is_ok_and(|v| !v.is_empty());
+        let has_config = (self.env_getter)("K_CONFIGURATION").is_ok_and(|v| !v.is_empty());
+        let has_function_target = (self.env_getter)("FUNCTION_TARGET").is_ok_and(|v| !v.is_empty());
         has_config && !has_function_target
     }
 
     fn is_cloud_run_job(&self) -> bool {
-        env::var("CLOUD_RUN_JOB").is_ok_and(|v| !v.is_empty())
+        (self.env_getter)("CLOUD_RUN_JOB").is_ok_and(|v| !v.is_empty())
     }
 
     async fn is_kubernetes_engine(&self) -> bool {
@@ -194,33 +203,34 @@ impl ResourceAttributesGetter {
     }
 }
 
-impl Default for ResourceAttributesGetter {
+impl Default for ResourceAttributesGetter<HttpMetadataClient> {
     fn default() -> Self {
         Self {
-            metadata_client: MetadataClient::new(
+            metadata_client: HttpMetadataClient::new(
                 Client::builder(TokioExecutor::new()).build_http(),
             ),
+            env_getter: |key| env::var(key),
         }
     }
 }
 
-async fn detect_app_engine_resource(
-    getter: &ResourceAttributesGetter,
+async fn detect_app_engine_resource<C: MetadataClient>(
+    getter: &ResourceAttributesGetter<C>,
 ) -> Option<MonitoredResource> {
     // We are not sure if the metadata service can return an empty string
     // for project ID. Thus, we do some unergonormic string base work here.
     let mut project_id = getter.metadata_project_id().await.unwrap_or_default();
     if project_id.is_empty() {
-        project_id = env::var("GOOGLE_CLOUD_PROJECT").unwrap_or_default();
+        project_id = (getter.env_getter)("GOOGLE_CLOUD_PROJECT").unwrap_or_default();
     }
     if project_id.is_empty() {
         return None;
     }
     let zone = getter.metadata_zone().await;
-    let module_id = env::var("GAE_SERVICE")
+    let module_id = (getter.env_getter)("GAE_SERVICE")
         .ok()
-        .or_else(|| env::var("GAE_MODULE_NAME").ok());
-    let version_id = env::var("GAE_VERSION").ok();
+        .or_else(|| (getter.env_getter)("GAE_MODULE_NAME").ok());
+    let version_id = (getter.env_getter)("GAE_VERSION").ok();
 
     Some(MonitoredResource::AppEngine {
         project_id,
@@ -230,15 +240,16 @@ async fn detect_app_engine_resource(
     })
 }
 
-async fn detect_cloud_function_resource(
-    getter: &ResourceAttributesGetter,
+async fn detect_cloud_function_resource<C: MetadataClient>(
+    getter: &ResourceAttributesGetter<C>,
 ) -> Option<MonitoredResource> {
     let project_id = getter.metadata_project_id().await.unwrap_or_default();
     if project_id.is_empty() {
         return None;
     }
     let region = getter.metadata_region().await;
-    let function_name = env::var("K_SERVICE").ok();
+    // This used to be FUNCTION_NAME, but that seems to be legacy.
+    let function_name = (getter.env_getter)("K_SERVICE").ok();
     Some(MonitoredResource::CloudFunction {
         project_id,
         region,
@@ -246,17 +257,17 @@ async fn detect_cloud_function_resource(
     })
 }
 
-async fn detect_cloud_run_service_resource(
-    getter: &ResourceAttributesGetter,
+async fn detect_cloud_run_service_resource<C: MetadataClient>(
+    getter: &ResourceAttributesGetter<C>,
 ) -> Option<MonitoredResource> {
     let project_id = getter.metadata_project_id().await.unwrap_or_default();
     if project_id.is_empty() {
         return None;
     }
     let location = getter.metadata_region().await;
-    let service_name = env::var("K_SERVICE").ok();
-    let revision_name = env::var("K_REVISION").ok();
-    let configuration_name = env::var("K_CONFIGURATION").ok();
+    let service_name = (getter.env_getter)("K_SERVICE").ok();
+    let revision_name = (getter.env_getter)("K_REVISION").ok();
+    let configuration_name = (getter.env_getter)("K_CONFIGURATION").ok();
     Some(MonitoredResource::CloudRunRevision {
         project_id,
         location,
@@ -266,15 +277,15 @@ async fn detect_cloud_run_service_resource(
     })
 }
 
-async fn detect_cloud_run_job_resource(
-    getter: &ResourceAttributesGetter,
+async fn detect_cloud_run_job_resource<C: MetadataClient>(
+    getter: &ResourceAttributesGetter<C>,
 ) -> Option<MonitoredResource> {
     let project_id = getter.metadata_project_id().await.unwrap_or_default();
     if project_id.is_empty() {
         return None;
     }
     let location = getter.metadata_region().await;
-    let job_name = env::var("CLOUD_RUN_JOB").ok();
+    let job_name = (getter.env_getter)("CLOUD_RUN_JOB").ok();
     Some(MonitoredResource::CloudRunJob {
         project_id,
         location,
@@ -282,8 +293,8 @@ async fn detect_cloud_run_job_resource(
     })
 }
 
-async fn detect_kubernetes_resource(
-    getter: &ResourceAttributesGetter,
+async fn detect_kubernetes_resource<C: MetadataClient>(
+    getter: &ResourceAttributesGetter<C>,
 ) -> Option<MonitoredResource> {
     let project_id = getter.metadata_project_id().await.unwrap_or_default();
     if project_id.is_empty() {
@@ -304,12 +315,12 @@ async fn detect_kubernetes_resource(
     if namespace_name.as_deref() == Some("") {
         // if automountServiceAccountToken is disabled allow to customize
         // the namespace via environment
-        namespace_name = env::var("NAMESPACE_NAME").ok();
+        namespace_name = (getter.env_getter)("NAMESPACE_NAME").ok();
     }
     // note: if deployment customizes hostname, HOSTNAME envvar will have invalid content
-    let pod_name = env::var("HOSTNAME").ok();
+    let pod_name = (getter.env_getter)("HOSTNAME").ok();
     // there is no way to derive container name from within container; use custom envvar if available
-    let container_name = env::var("CONTAINER_NAME").ok();
+    let container_name = (getter.env_getter)("CONTAINER_NAME").ok();
     Some(MonitoredResource::KubernetesEngine {
         project_id,
         cluster_name,
@@ -320,8 +331,8 @@ async fn detect_kubernetes_resource(
     })
 }
 
-async fn detect_compute_engine_resource(
-    getter: &ResourceAttributesGetter,
+async fn detect_compute_engine_resource<C: MetadataClient>(
+    getter: &ResourceAttributesGetter<C>,
 ) -> Option<MonitoredResource> {
     let project_id = getter.metadata_project_id().await.unwrap_or_default();
     if project_id.is_empty() {
@@ -333,4 +344,189 @@ async fn detect_compute_engine_resource(
         instance_id,
         zone,
     })
+}
+#[cfg(test)]
+mod tests {
+    //! Tests taken from the go SDK implementation.
+    use super::metadata::Error as MetadataError;
+    use super::*;
+
+    use std::collections::HashMap;
+    use std::env::VarError;
+
+    use opentelemetry_stackdriver::MonitoredResource;
+
+    #[tokio::test]
+    async fn cloud_platform_gke() {
+        let getter = ResourceAttributesGetter {
+            metadata_client: FakeMetadataClient::new(&[(
+                "instance/attributes/cluster-name",
+                "my-cluster",
+            )]),
+            env_getter: |_| Err(VarError::NotPresent),
+        };
+        let resource = detect_resource(getter).await.unwrap();
+        assert!(matches!(
+            resource,
+            MonitoredResource::KubernetesEngine { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn cloud_platform_k8s_not_gke() {
+        let getter = ResourceAttributesGetter {
+            metadata_client: FakeMetadataClient::new(&[]),
+            env_getter: |_| Err(VarError::NotPresent),
+        };
+        let resource = detect_resource(getter).await.unwrap();
+        assert!(matches!(resource, MonitoredResource::ComputeEngine { .. }));
+    }
+
+    #[tokio::test]
+    async fn cloud_platform_unknown() {
+        let getter = ResourceAttributesGetter {
+            metadata_client: FailingMetadataClient,
+            env_getter: |_| Err(VarError::NotPresent),
+        };
+        let result = detect_resource(getter).await;
+        assert!(matches!(result, Err(DetectError::DetectionFailed)));
+    }
+
+    #[tokio::test]
+    async fn cloud_platform_gce() {
+        let getter = ResourceAttributesGetter {
+            metadata_client: FakeMetadataClient::new(&[]),
+            env_getter: |_| Err(VarError::NotPresent),
+        };
+        let resource = detect_resource(getter).await.unwrap();
+        assert!(matches!(resource, MonitoredResource::ComputeEngine { .. }));
+    }
+
+    #[tokio::test]
+    async fn cloud_platform_cloud_run() {
+        let getter = ResourceAttributesGetter {
+            metadata_client: FakeMetadataClient::new(&[]),
+            env_getter: |key| match key {
+                "K_CONFIGURATION" => Ok("my-config".into()),
+                "K_SERVICE" => Ok("my-service".into()),
+                _ => Err(VarError::NotPresent),
+            },
+        };
+        let resource = detect_resource(getter).await.unwrap();
+        assert!(matches!(
+            resource,
+            MonitoredResource::CloudRunRevision { service_name, .. } if service_name.as_deref() == Some("my-service")
+        ));
+    }
+
+    #[tokio::test]
+    async fn cloud_platform_cloud_run_jobs() {
+        let getter = ResourceAttributesGetter {
+            metadata_client: FakeMetadataClient::new(&[]),
+            env_getter: |key| match key {
+                "CLOUD_RUN_JOB" => Ok("my-job".into()),
+                _ => Err(VarError::NotPresent),
+            },
+        };
+        let resource = detect_resource(getter).await.unwrap();
+        assert!(
+            matches!(resource, MonitoredResource::CloudRunJob { job_name, .. } if job_name.as_deref() == Some("my-job"))
+        );
+    }
+
+    #[tokio::test]
+    async fn cloud_platform_cloud_functions() {
+        let getter = ResourceAttributesGetter {
+            metadata_client: FakeMetadataClient::new(&[]),
+            env_getter: |key| match key {
+                "FUNCTION_TARGET" => Ok("my-function".into()),
+                "K_SERVICE" => Ok("my-function".into()),
+                _ => Err(VarError::NotPresent),
+            },
+        };
+        let resource = detect_resource(getter).await.unwrap();
+        assert!(
+            matches!(resource, MonitoredResource::CloudFunction { function_name, .. } if function_name.as_deref() == Some("my-function"))
+        );
+    }
+
+    #[tokio::test]
+    async fn project_id() {
+        let getter = ResourceAttributesGetter {
+            metadata_client: FakeMetadataClient::new(&[]),
+            env_getter: |key| match key {
+                "K_CONFIGURATION" => Ok("my-config".into()),
+                _ => Err(VarError::NotPresent),
+            },
+        };
+        let resource = detect_resource(getter).await.unwrap();
+        assert!(matches!(
+            resource,
+            MonitoredResource::CloudRunRevision { project_id, .. } if project_id == "my-project"
+        ));
+    }
+
+    #[tokio::test]
+    async fn project_id_err() {
+        let getter = ResourceAttributesGetter {
+            metadata_client: FailingMetadataClient,
+            env_getter: |_| Err(VarError::NotPresent),
+        };
+        let result = detect_resource(getter).await;
+        assert!(result.is_err());
+    }
+
+    struct FakeMetadataClient {
+        metadata: HashMap<&'static str, &'static str>,
+    }
+
+    impl FakeMetadataClient {
+        fn new(extra: &[(&'static str, &'static str)]) -> Self {
+            let mut metadata = HashMap::from([
+                ("", "ok"),
+                ("project/project-id", "my-project"),
+                ("instance/id", "1234567891"),
+                ("instance/zone", "projects/1234567890/zones/us-central1-a"),
+                ("instance/preempted", "false"),
+                ("instance/cpu-platform", "Intel Broadwell"),
+            ]);
+            for &(k, v) in extra {
+                metadata.insert(k, v);
+            }
+            Self { metadata }
+        }
+    }
+
+    impl MetadataClient for FakeMetadataClient {
+        async fn resolve_etag(
+            &self,
+            suffix: &str,
+        ) -> Result<(String, Option<String>), MetadataError> {
+            match self.metadata.get(suffix) {
+                Some(value) => Ok(((*value).to_owned(), None)),
+                None => Err(MetadataError::NotDefined(suffix.to_owned())),
+            }
+        }
+
+        async fn resolve(&self, suffix: &str) -> Result<String, MetadataError> {
+            let (body, _) = self.resolve_etag(suffix).await?;
+            Ok(body)
+        }
+    }
+
+    /// A metadata client that always returns an error (simulates no metadata server).
+    struct FailingMetadataClient;
+
+    impl MetadataClient for FailingMetadataClient {
+        async fn resolve_etag(
+            &self,
+            suffix: &str,
+        ) -> Result<(String, Option<String>), MetadataError> {
+            Err(MetadataError::NotDefined(suffix.to_owned()))
+        }
+
+        async fn resolve(&self, suffix: &str) -> Result<String, MetadataError> {
+            Err(MetadataError::NotDefined(suffix.to_owned()))
+        }
+    }
 }
