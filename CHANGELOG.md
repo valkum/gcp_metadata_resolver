@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Other
 
 - Pin GitHub actions
+- Switch to cargo-deny
 - Bump actions/checkout from 5 to 6
 
 ## [0.3.0](https://github.com/valkum/gcp_metadata_resolver/compare/v0.2.0...v0.3.0) - 2025-10-06
