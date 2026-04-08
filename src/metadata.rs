@@ -1,10 +1,12 @@
 //! A small client for the Google Cloud Platform metadata service.
 use std::str;
+use std::time::Duration;
 
 use http_body_util::{BodyExt, Full};
 use hyper::{StatusCode, body::Bytes};
 use hyper_util::client::legacy::{Client, connect::HttpConnector};
 use thiserror::Error;
+use tokio::time::timeout;
 
 /// A client for the GCP metadata service.
 #[allow(async_fn_in_trait)]
@@ -52,7 +54,10 @@ impl MetadataClient for HttpMetadataClient {
             .body(Full::default())
             .map_err(HttpError::from)?;
         // The Go SDK retries this request. We don't do that here. For now.
-        let res = self.client.request(req).await.map_err(HttpError::from)?;
+        let res = timeout(Duration::from_secs(5), self.client.request(req))
+            .await
+            .map_err(|_| Error::RequestTimeout)?
+            .map_err(HttpError::from)?;
         let (parts, body) = res.into_parts();
 
         if parts.status == StatusCode::NOT_FOUND {
@@ -89,6 +94,9 @@ pub enum Error {
 
     #[error("Suffix {0} not defined")]
     NotDefined(String),
+
+    #[error("Request timed out")]
+    RequestTimeout,
 }
 
 #[derive(Debug, Error)]

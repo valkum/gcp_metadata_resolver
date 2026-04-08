@@ -8,8 +8,11 @@
 use std::env::{self, VarError};
 use std::fs::File;
 use std::io::Read;
+use std::sync::OnceLock;
+use std::time::Duration;
 
 use async_once_cell::OnceCell;
+use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::{client::legacy::Client, rt::TokioExecutor};
 use opentelemetry_stackdriver::MonitoredResource;
 use thiserror::Error;
@@ -228,10 +231,14 @@ impl<C: MetadataClient> ResourceAttributesGetter<C> {
 
 impl Default for ResourceAttributesGetter<HttpMetadataClient> {
     fn default() -> Self {
+        // Set up a hyper client with the same timeouts as the go SDK.
+        let mut connector = HttpConnector::new();
+        connector.set_connect_timeout(Some(Duration::from_secs(2)));
+        let client = Client::builder(TokioExecutor::new())
+            .pool_idle_timeout(Duration::from_secs(60))
+            .build(connector);
         Self {
-            metadata_client: HttpMetadataClient::new(
-                Client::builder(TokioExecutor::new()).build_http(),
-            ),
+            metadata_client: HttpMetadataClient::new(client),
             env_getter: |key| env::var(key),
         }
     }
