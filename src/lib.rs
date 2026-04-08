@@ -32,6 +32,18 @@ pub async fn detected_resource() -> Result<&'static MonitoredResource, DetectErr
         .await
 }
 
+/// Detects the project ID for the current environment.
+pub async fn project_id() -> Option<String> {
+    let getter = ResourceAttributesGetter::default();
+    getter.metadata_project_id().await
+}
+
+/// Detects the instance ID for the current environment.
+pub async fn instance_id() -> Option<String> {
+    let getter = ResourceAttributesGetter::default();
+    getter.metadata_instance_id().await
+}
+
 #[derive(Debug, Error)]
 pub enum DetectError {
     #[error("Failed to detect projectId")]
@@ -137,6 +149,10 @@ impl<C: MetadataClient> ResourceAttributesGetter<C> {
 
     async fn metadata_project_id(&self) -> Option<String> {
         self.metadata("project/project-id").await
+    }
+
+    async fn metadata_instance_id(&self) -> Option<String> {
+        self.metadata("instance/id").await
     }
 
     async fn metadata_zone(&self) -> Option<String> {
@@ -464,6 +480,19 @@ mod tests {
             resource,
             MonitoredResource::CloudRunRevision { project_id, .. } if project_id == "my-project"
         ));
+    }
+
+    #[tokio::test]
+    async fn instance_id() {
+        let getter = ResourceAttributesGetter {
+            metadata_client: FakeMetadataClient::new(&[]),
+            env_getter: |key| match key {
+                "K_CONFIGURATION" => Ok("my-config".into()),
+                _ => Err(VarError::NotPresent),
+            },
+        };
+        let instance_id = getter.metadata_instance_id().await.unwrap();
+        assert_eq!(&instance_id, "1234567891");
     }
 
     #[tokio::test]
