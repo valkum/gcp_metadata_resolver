@@ -17,6 +17,7 @@ use thiserror::Error;
 mod metadata;
 use metadata::{HttpMetadataClient, MetadataClient};
 
+static DETECTOR: OnceLock<ResourceAttributesGetter<HttpMetadataClient>> = OnceLock::new();
 static DETECTED_RESOURCE: OnceCell<MonitoredResource> = OnceCell::new();
 
 /// Detects the monitored resource for the current environment.
@@ -28,20 +29,26 @@ static DETECTED_RESOURCE: OnceCell<MonitoredResource> = OnceCell::new();
 /// This will return an error if the resource could not be detected.
 pub async fn detected_resource() -> Result<&'static MonitoredResource, DetectError> {
     DETECTED_RESOURCE
-        .get_or_try_init(detect_resource(ResourceAttributesGetter::default()))
+        .get_or_try_init(detect_resource(
+            DETECTOR.get_or_init(ResourceAttributesGetter::default),
+        ))
         .await
 }
 
 /// Detects the project ID for the current environment.
 pub async fn project_id() -> Option<String> {
-    let getter = ResourceAttributesGetter::default();
-    getter.metadata_project_id().await
+    DETECTOR
+        .get_or_init(ResourceAttributesGetter::default)
+        .metadata_project_id()
+        .await
 }
 
 /// Detects the instance ID for the current environment.
 pub async fn instance_id() -> Option<String> {
-    let getter = ResourceAttributesGetter::default();
-    getter.metadata_instance_id().await
+    DETECTOR
+        .get_or_init(ResourceAttributesGetter::default)
+        .metadata_instance_id()
+        .await
 }
 
 #[derive(Debug, Error)]
@@ -54,18 +61,18 @@ pub enum DetectError {
 
 /// Detect the environment using the given getter
 async fn detect_resource<C: MetadataClient>(
-    getter: ResourceAttributesGetter<C>,
+    getter: &ResourceAttributesGetter<C>,
 ) -> Result<MonitoredResource, DetectError> {
     if getter.is_metadata_active().await {
         // Fast path
         match system_product_name().as_deref() {
             Some("Google App Engine") => {
-                return detect_app_engine_resource(&getter)
+                return detect_app_engine_resource(getter)
                     .await
                     .ok_or(DetectError::NoProjectId);
             }
             Some("Google Cloud Functions") => {
-                return detect_cloud_function_resource(&getter)
+                return detect_cloud_function_resource(getter)
                     .await
                     .ok_or(DetectError::NoProjectId);
             }
@@ -73,32 +80,32 @@ async fn detect_resource<C: MetadataClient>(
         }
 
         if getter.is_app_engine() {
-            return detect_app_engine_resource(&getter)
+            return detect_app_engine_resource(getter)
                 .await
                 .ok_or(DetectError::NoProjectId);
         }
         if getter.is_cloud_function() {
-            return detect_cloud_function_resource(&getter)
+            return detect_cloud_function_resource(getter)
                 .await
                 .ok_or(DetectError::NoProjectId);
         }
         if getter.is_cloud_run_service() {
-            return detect_cloud_run_service_resource(&getter)
+            return detect_cloud_run_service_resource(getter)
                 .await
                 .ok_or(DetectError::NoProjectId);
         }
         if getter.is_cloud_run_job() {
-            return detect_cloud_run_job_resource(&getter)
+            return detect_cloud_run_job_resource(getter)
                 .await
                 .ok_or(DetectError::NoProjectId);
         }
         if getter.is_kubernetes_engine().await {
-            return detect_kubernetes_resource(&getter)
+            return detect_kubernetes_resource(getter)
                 .await
                 .ok_or(DetectError::NoProjectId);
         }
         if getter.is_compute_engine().await {
-            return detect_compute_engine_resource(&getter)
+            return detect_compute_engine_resource(getter)
                 .await
                 .ok_or(DetectError::NoProjectId);
         }
@@ -381,7 +388,7 @@ mod tests {
             )]),
             env_getter: |_| Err(VarError::NotPresent),
         };
-        let resource = detect_resource(getter).await.unwrap();
+        let resource = detect_resource(&getter).await.unwrap();
         assert!(matches!(
             resource,
             MonitoredResource::KubernetesEngine { .. }
@@ -394,7 +401,7 @@ mod tests {
             metadata_client: FakeMetadataClient::new(&[]),
             env_getter: |_| Err(VarError::NotPresent),
         };
-        let resource = detect_resource(getter).await.unwrap();
+        let resource = detect_resource(&getter).await.unwrap();
         assert!(matches!(resource, MonitoredResource::ComputeEngine { .. }));
     }
 
@@ -404,7 +411,7 @@ mod tests {
             metadata_client: FailingMetadataClient,
             env_getter: |_| Err(VarError::NotPresent),
         };
-        let result = detect_resource(getter).await;
+        let result = detect_resource(&getter).await;
         assert!(matches!(result, Err(DetectError::DetectionFailed)));
     }
 
@@ -414,7 +421,7 @@ mod tests {
             metadata_client: FakeMetadataClient::new(&[]),
             env_getter: |_| Err(VarError::NotPresent),
         };
-        let resource = detect_resource(getter).await.unwrap();
+        let resource = detect_resource(&getter).await.unwrap();
         assert!(matches!(resource, MonitoredResource::ComputeEngine { .. }));
     }
 
@@ -428,7 +435,7 @@ mod tests {
                 _ => Err(VarError::NotPresent),
             },
         };
-        let resource = detect_resource(getter).await.unwrap();
+        let resource = detect_resource(&getter).await.unwrap();
         assert!(matches!(
             resource,
             MonitoredResource::CloudRunRevision { service_name, .. } if service_name.as_deref() == Some("my-service")
@@ -444,7 +451,7 @@ mod tests {
                 _ => Err(VarError::NotPresent),
             },
         };
-        let resource = detect_resource(getter).await.unwrap();
+        let resource = detect_resource(&getter).await.unwrap();
         assert!(
             matches!(resource, MonitoredResource::CloudRunJob { job_name, .. } if job_name.as_deref() == Some("my-job"))
         );
@@ -460,7 +467,7 @@ mod tests {
                 _ => Err(VarError::NotPresent),
             },
         };
-        let resource = detect_resource(getter).await.unwrap();
+        let resource = detect_resource(&getter).await.unwrap();
         assert!(
             matches!(resource, MonitoredResource::CloudFunction { function_name, .. } if function_name.as_deref() == Some("my-function"))
         );
@@ -475,7 +482,7 @@ mod tests {
                 _ => Err(VarError::NotPresent),
             },
         };
-        let resource = detect_resource(getter).await.unwrap();
+        let resource = detect_resource(&getter).await.unwrap();
         assert!(matches!(
             resource,
             MonitoredResource::CloudRunRevision { project_id, .. } if project_id == "my-project"
@@ -501,7 +508,7 @@ mod tests {
             metadata_client: FailingMetadataClient,
             env_getter: |_| Err(VarError::NotPresent),
         };
-        let result = detect_resource(getter).await;
+        let result = detect_resource(&getter).await;
         assert!(result.is_err());
     }
 
