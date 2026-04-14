@@ -4,9 +4,42 @@
 [![Docs.rs](https://docs.rs/gcp_metadata_resolver/badge.svg)](https://docs.rs/gcp_metadata_resolver)
 [![CI](https://github.com/valkum/gcp_metadata_resolver/workflows/CI/badge.svg)](https://github.com/valkum/gcp_metadata_resolver/actions)
 
-This is a helper crate to support setting up `optentelemetry-stackdriver`.
-It will figure in which environment it runs and will create a fitting `MonitoredResource`.
-This is based on existing official stackdriver implementations in other languages.
+Detects the GCP environment and provides resource metadata for use with telemetry options such as OpenTelemetry.
+
+This crate queries the [GCE metadata server](https://cloud.google.com/compute/docs/metadata/overview) to identify the running platform
+(Compute Engine, GKE, Cloud Run, Cloud Functions, App Engine) and exposes two complementary APIs:
+
+- `detected_resource()` returns a [`MonitoredResource`](https://docs.rs/opentelemetry-stackdriver/latest/opentelemetry_stackdriver/enum.MonitoredResource.html) for use with the
+  [opentelemetry-stackdriver](https://crates.io/crates/opentelemetry-stackdriver) Cloud Trace exporter.
+- `resource_attributes()` returns `GcpResourceAttributes`, a typed struct of
+  [OpenTelemetry semantic convention](https://opentelemetry.io/docs/specs/semconv/resource/cloud/) resource attributes
+  suitable for any OTLP exporter (e.g. [GCP Managed Prometheus via OTLP](https://cloud.google.com/stackdriver/docs/otlp-metrics/overview)).
+
+The detection logic mirrors the [Go GCP resource detector](https://pkg.go.dev/go.opentelemetry.io/contrib/detectors/gcp) and the
+[OTel Collector GCP processor](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/processor/resourcedetectionprocessor/internal/gcp).
+
+### Attribute matrix
+
+Which `GcpResourceAttributes` fields are populated depends on the detected platform:
+
+| Field | GCE | GKE | Cloud Run | Cloud Run Job | Cloud Functions | App Engine |
+|---|---|---|---|---|---|---|
+| `cloud_account_id` | x | x | x | x | x | x |
+| `cloud_platform` | x | x | x | x | x | x |
+| `cloud_region` | x | x | x | x | x | x |
+| `cloud_availability_zone` | x | x | | | | x |
+| `host_id` | x | x | | | | |
+| `host_name` | x | x | | | | |
+| `host_type` | x | x | | | | |
+| `gce_instance_name` | x | x | | | | |
+| `gce_instance_hostname` | x | x | | | | |
+| `gce_instance_group_manager_*` | x* | x* | | | | |
+| `k8s_cluster_name` | | x | | | | |
+| `faas_name` | | | x | x | x | x |
+| `faas_version` | | | x | | x | x |
+| `faas_instance` | | | x | x | x | x |
+
+*\* MIG fields are only set when the instance belongs to a managed instance group.*
 
 ## License
 
