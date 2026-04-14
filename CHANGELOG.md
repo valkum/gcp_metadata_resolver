@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2](https://github.com/valkum/gcp_metadata_resolver/compare/v0.3.1...v0.3.2) - 2026-04-14
+
+### Added
+
+- add OpenTelemetry semantic convention resource attributes
+- add timeouts to metadata HTTP client
+- stick to single ResourceAttributesGetter
+- add pub getters for instanceId and projectId
+
+### Other
+
+- *(deps)* bump EmbarkStudios/cargo-deny-action from 2.0.15 to 2.0.16
+- extract cloud_platform string literals into constants
+- Bump release-plz/action from 0.5.127 to 0.5.128
+- Bump actions-rust-lang/setup-rust-toolchain from 1.15.2 to 1.15.4
+
 ## [0.3.1](https://github.com/valkum/gcp_metadata_resolver/compare/v0.3.0...v0.3.1) - 2026-02-19
 
 ### Fixed
