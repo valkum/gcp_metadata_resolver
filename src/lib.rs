@@ -518,19 +518,19 @@ async fn detect_resource_attributes<C: MetadataClient>(
     } else if getter.is_cloud_function() {
         detect_cloud_function_attrs(getter, &mut attrs).await;
     } else if getter.is_cloud_run_service() {
-        attrs.cloud_platform = Some("gcp_cloud_run".to_owned());
+        attrs.cloud_platform = Some(CLOUD_PLATFORM_CLOUD_RUN.to_owned());
         attrs.cloud_region = getter.metadata_region().await;
         attrs.faas_name = (getter.env_getter)("K_SERVICE").ok();
         attrs.faas_version = (getter.env_getter)("K_REVISION").ok();
         attrs.faas_instance = getter.metadata_instance_id().await;
     } else if getter.is_cloud_run_job() {
-        attrs.cloud_platform = Some("gcp_cloud_run".to_owned());
+        attrs.cloud_platform = Some(CLOUD_PLATFORM_CLOUD_RUN.to_owned());
         attrs.cloud_region = getter.metadata_region().await;
         attrs.faas_name = (getter.env_getter)("CLOUD_RUN_JOB").ok();
         attrs.faas_instance = getter.metadata_instance_id().await;
     } else if getter.is_kubernetes_engine().await {
         detect_gce_attrs(getter, &mut attrs).await;
-        attrs.cloud_platform = Some("gcp_kubernetes_engine".to_owned());
+        attrs.cloud_platform = Some(CLOUD_PLATFORM_KUBERNETES_ENGINE.to_owned());
         attrs.k8s_cluster_name = getter.metadata("instance/attributes/cluster-name").await;
         if let Some(location) = getter
             .metadata("instance/attributes/cluster-location")
@@ -554,7 +554,7 @@ async fn detect_gce_attrs<C: MetadataClient>(
     getter: &ResourceAttributesGetter<C>,
     attrs: &mut GcpResourceAttributes,
 ) {
-    attrs.cloud_platform = Some("gcp_compute_engine".to_owned());
+    attrs.cloud_platform = Some(CLOUD_PLATFORM_COMPUTE_ENGINE.to_owned());
 
     let (zone, host_id, instance_name, hostname, machine_type, created_by) = tokio::join!(
         getter.metadata_zone(),
@@ -592,7 +592,7 @@ async fn detect_app_engine_attrs<C: MetadataClient>(
     getter: &ResourceAttributesGetter<C>,
     attrs: &mut GcpResourceAttributes,
 ) {
-    attrs.cloud_platform = Some("gcp_app_engine".to_owned());
+    attrs.cloud_platform = Some(CLOUD_PLATFORM_APP_ENGINE.to_owned());
     if let Some(zone) = getter.metadata_zone().await {
         attrs.cloud_region = zone_to_region(&zone).map(str::to_owned);
         attrs.cloud_availability_zone = Some(zone);
@@ -608,7 +608,7 @@ async fn detect_cloud_function_attrs<C: MetadataClient>(
     getter: &ResourceAttributesGetter<C>,
     attrs: &mut GcpResourceAttributes,
 ) {
-    attrs.cloud_platform = Some("gcp_cloud_functions".to_owned());
+    attrs.cloud_platform = Some(CLOUD_PLATFORM_CLOUD_FUNCTIONS.to_owned());
     attrs.cloud_region = getter.metadata_region().await;
     attrs.faas_name = (getter.env_getter)("K_SERVICE").ok();
     attrs.faas_version = (getter.env_getter)("FUNCTION_TARGET").ok();
@@ -677,6 +677,12 @@ pub struct GcpResourceAttributes {
     /// execution environment instance ID. Set on Cloud Run, Cloud Functions, and App Engine.
     pub faas_instance: Option<String>,
 }
+
+pub const CLOUD_PLATFORM_COMPUTE_ENGINE: &str = "gcp_compute_engine";
+pub const CLOUD_PLATFORM_KUBERNETES_ENGINE: &str = "gcp_kubernetes_engine";
+pub const CLOUD_PLATFORM_CLOUD_RUN: &str = "gcp_cloud_run";
+pub const CLOUD_PLATFORM_CLOUD_FUNCTIONS: &str = "gcp_cloud_functions";
+pub const CLOUD_PLATFORM_APP_ENGINE: &str = "gcp_app_engine";
 
 fn zone_to_region(zone: &str) -> Option<&str> {
     zone.rsplit_once('-').map(|(region, _)| region)
