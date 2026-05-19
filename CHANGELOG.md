@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/valkum/gcp_metadata_resolver/compare/v0.3.2...v0.4.0) - 2026-05-19
+
+### Other
+
+- *(deps)* bump actions-rust-lang/setup-rust-toolchain
+- *(deps)* bump release-plz/action from 0.5.128 to 0.5.129
+- *(deps)* bump EmbarkStudios/cargo-deny-action from 2.0.16 to 2.0.18
+- *(deps)* update opentelemetry-stackdriver requirement
+
 ## [0.3.2](https://github.com/valkum/gcp_metadata_resolver/compare/v0.3.1...v0.3.2) - 2026-04-14
 
 ### Added
