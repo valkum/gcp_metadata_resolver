@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Make the metadata server URL in the documentation a hyperlink. It failed the
+  `rustdoc::bare_urls` lint.
+
 ## [0.4.0](https://github.com/valkum/gcp_metadata_resolver/compare/v0.3.2...v0.4.0) - 2026-05-19
 
 ### Other
