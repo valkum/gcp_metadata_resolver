@@ -36,6 +36,34 @@ let labels: HashMap<String, String> = resource
 App Engine: it has no `gae_app` and uses `gae_instance`, which takes different labels. For metrics, prefer
 `resource_attributes()` and an OTLP exporter.
 
+### `opentelemetry` feature
+
+`resource_attributes()` gives the attributes that the
+[Google Telemetry API](https://docs.cloud.google.com/stackdriver/docs/reference/telemetry/overview) uses to derive
+the monitored resource. `attributes()` returns them keyed by semantic convention name, with no extra dependency:
+
+```rust
+let attrs = gcp_metadata_resolver::resource_attributes().await?;
+for (key, value) in attrs.attributes() { // ("cloud.platform", "gcp_compute_engine"), ...
+    println!("{key}={value}");
+}
+```
+
+Enable the `opentelemetry` feature to get the SDK types directly:
+
+```toml
+gcp_metadata_resolver = { version = "0.5", features = ["opentelemetry"] }
+```
+
+```rust
+let resource = opentelemetry_sdk::Resource::from(
+    gcp_metadata_resolver::resource_attributes().await?,
+);
+```
+
+Note that the monitored resource is carried by these resource attributes. OpenTelemetry Baggage has no part in it:
+Baggage propagates to downstream services over the `baggage` header and no exporter reads it as resource identity.
+
 ### `stackdriver` feature
 
 [opentelemetry-stackdriver](https://crates.io/crates/opentelemetry-stackdriver) is
