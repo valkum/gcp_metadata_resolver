@@ -116,7 +116,7 @@ pub enum HttpError {
 
 /// The documented metadata server IP address.
 ///
-/// See: https://cloud.google.com/compute/docs/metadata/querying-metadata#metadata_server_endpoints
+/// See: <https://cloud.google.com/compute/docs/metadata/querying-metadata#metadata_server_endpoints>
 const METADATA_IP: &str = "169.254.169.254";
 
 /// The environment variable specifying the GCE metadata hostname.

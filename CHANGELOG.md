@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add `MonitoredResource`, a GCP monitored resource type that this crate owns.
+  It has `resource_type()`, `project_id()` and `labels()` accessors that give
+  the `google.api.MonitoredResource` form.
+- Add the optional `stackdriver` feature. It converts `MonitoredResource` into
+  `opentelemetry_stackdriver::MonitoredResource`.
+- Add `GcpResourceAttributes::attributes()`. It returns the populated
+  attributes, keyed by semantic convention name.
+- Add the optional `opentelemetry` feature. It converts
+  `GcpResourceAttributes` into `Vec<KeyValue>` and into
+  `opentelemetry_sdk::Resource`.
+
+### Changed
+
+- **Breaking**: `detected_resource()` returns the `MonitoredResource` of this
+  crate. Before, it returned `opentelemetry_stackdriver::MonitoredResource`.
+  Enable the `stackdriver` feature and call `.into()` to keep the old type.
+- **Breaking**: `opentelemetry-stackdriver` is deprecated. It is now an
+  optional dependency and it is off by default. This removes 98 of the 140
+  transitive dependencies from a default build.
+
+### Fixed
+
+- Make the metadata server URL in the documentation a hyperlink. It failed the
+  `rustdoc::bare_urls` lint.
+
 ## [0.4.0](https://github.com/valkum/gcp_metadata_resolver/compare/v0.3.2...v0.4.0) - 2026-05-19
 
 ### Other

@@ -8,8 +8,9 @@
 //! (Compute Engine, GKE, Cloud Run, Cloud Functions, App Engine) and exposes
 //! two complementary APIs:
 //!
-//! - [`detected_resource`] returns a [`MonitoredResource`] for use with the
-//!   [Cloud Trace / Stackdriver exporter][opentelemetry-stackdriver].
+//! - [`detected_resource`] returns a [`MonitoredResource`], the GCP monitored
+//!   resource type and labels that the Cloud Logging and Cloud Monitoring APIs
+//!   accept.
 //! - [`resource_attributes`] returns [`GcpResourceAttributes`], a typed struct
 //!   of [OpenTelemetry semantic convention] resource attributes suitable for
 //!   any OTLP exporter (e.g. [GCP Managed Prometheus via OTLP]).
@@ -53,6 +54,8 @@
 //! [GCP Managed Prometheus via OTLP]: https://docs.cloud.google.com/stackdriver/docs/otlp-metrics/overview
 //! [Go GCP resource detector]: https://pkg.go.dev/go.opentelemetry.io/contrib/detectors/gcp
 //! [OTel Collector GCP processor]: https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/processor/resourcedetectionprocessor/internal/gcp
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
 use std::env::{self, VarError};
 use std::fs::File;
 use std::io::Read;
@@ -62,20 +65,34 @@ use std::time::Duration;
 use async_once_cell::OnceCell;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::{client::legacy::Client, rt::TokioExecutor};
-use opentelemetry_stackdriver::MonitoredResource;
 use thiserror::Error;
 
 mod metadata;
 use metadata::{HttpMetadataClient, MetadataClient};
 
+mod monitored_resource;
+pub use monitored_resource::MonitoredResource;
+
+#[cfg(feature = "opentelemetry")]
+mod otel;
+
 /// Detects the [`MonitoredResource`] for the current GCP environment.
 ///
-/// Returns a Stackdriver-typed resource for use with the
-/// [`opentelemetry-stackdriver`](https://crates.io/crates/opentelemetry-stackdriver)
-/// Cloud Trace exporter. The result is cached; subsequent calls return the
-/// same value without re-querying the metadata server.
+/// Use [`MonitoredResource::resource_type`] and [`MonitoredResource::labels`]
+/// to get the flat [`google.api.MonitoredResource`] form, or match on the
+/// variant to build whatever your client needs. The result is cached;
+/// subsequent calls return the same value without re-querying the metadata
+/// server.
+///
+/// With the `stackdriver` feature, [`From`] converts the result into
+/// [`opentelemetry_stackdriver::MonitoredResource`]. That crate is
+/// [deprecated], so the feature is off by default.
 ///
 /// For OTLP exporters (metrics, logs), prefer [`resource_attributes`] instead.
+///
+/// [deprecated]: https://github.com/open-telemetry/opentelemetry-rust-contrib/issues/609
+/// [`google.api.MonitoredResource`]: https://cloud.google.com/logging/docs/reference/v2/rest/v2/MonitoredResource
+/// [`opentelemetry_stackdriver::MonitoredResource`]: https://docs.rs/opentelemetry-stackdriver/latest/opentelemetry_stackdriver/enum.MonitoredResource.html
 ///
 /// # Errors
 ///
@@ -117,7 +134,7 @@ pub async fn instance_id() -> Option<String> {
 /// Returns `None` when the [metadata server] is unreachable or the project
 /// ID cannot be determined (e.g. local development).
 ///
-/// When sending metrics to the [GCP Telemetry (OTLP) API] `v1.metrics` endpoint, the
+/// When sending metrics to the [Google Telemetry API] `v1.metrics` endpoint, the
 /// `prometheus_target` monitored resource requires `location` (mapped from
 /// `location`, [`cloud.availability_zone`][GcpResourceAttributes::cloud_availability_zone],
 /// or [`cloud.region`][GcpResourceAttributes::cloud_region]) and `instance`
@@ -128,7 +145,7 @@ pub async fn instance_id() -> Option<String> {
 /// [OpenTelemetry resource attributes]: https://opentelemetry.io/docs/specs/semconv/resource/cloud/
 /// [Go GCP detector]: https://pkg.go.dev/go.opentelemetry.io/contrib/detectors/gcp
 /// [metadata server]: https://cloud.google.com/compute/docs/metadata/overview
-/// [GCP Telemetry (OTLP) API]: https://cloud.google.com/stackdriver/docs/reference/telemetry/v1.metrics
+/// [Google Telemetry API]: https://cloud.google.com/stackdriver/docs/reference/telemetry/v1.metrics
 pub async fn resource_attributes() -> Option<&'static GcpResourceAttributes> {
     DETECTED_ATTRIBUTES
         .get_or_init(detect_resource_attributes(
@@ -678,6 +695,70 @@ pub struct GcpResourceAttributes {
     pub faas_instance: Option<String>,
 }
 
+impl GcpResourceAttributes {
+    /// Returns the populated attributes, keyed by [semantic convention] name.
+    ///
+    /// Fields that were not detected are absent. `cloud.provider` is always
+    /// present and is always `gcp`. Use this to build the `Resource` of an
+    /// OTLP exporter; the [Google Telemetry API] derives the monitored
+    /// resource from these attributes.
+    ///
+    /// With the `opentelemetry` feature, [`From`] builds a
+    /// [`Vec<KeyValue>`][opentelemetry::KeyValue] or a
+    /// [`Resource`][opentelemetry_sdk::Resource] directly.
+    ///
+    /// ```no_run
+    /// # async fn example() -> Option<()> {
+    /// let attrs = gcp_metadata_resolver::resource_attributes().await?;
+    /// for (key, value) in attrs.attributes() {
+    ///     println!("{key}={value}");
+    /// }
+    /// # Some(())
+    /// # }
+    /// ```
+    ///
+    /// [semantic convention]: https://opentelemetry.io/docs/specs/semconv/resource/
+    /// [Google Telemetry API]: https://cloud.google.com/stackdriver/docs/reference/telemetry/overview
+    /// [opentelemetry::KeyValue]: https://docs.rs/opentelemetry/latest/opentelemetry/struct.KeyValue.html
+    /// [opentelemetry_sdk::Resource]: https://docs.rs/opentelemetry_sdk/latest/opentelemetry_sdk/struct.Resource.html
+    pub fn attributes(&self) -> Vec<(&'static str, &str)> {
+        let optional = [
+            ("cloud.platform", &self.cloud_platform),
+            ("cloud.region", &self.cloud_region),
+            ("cloud.availability_zone", &self.cloud_availability_zone),
+            ("host.id", &self.host_id),
+            ("host.name", &self.host_name),
+            ("host.type", &self.host_type),
+            ("gcp.gce.instance.name", &self.gce_instance_name),
+            ("gcp.gce.instance.hostname", &self.gce_instance_hostname),
+            (
+                "gcp.gce.instance_group_manager.name",
+                &self.gce_instance_group_manager_name,
+            ),
+            (
+                "gcp.gce.instance_group_manager.region",
+                &self.gce_instance_group_manager_region,
+            ),
+            (
+                "gcp.gce.instance_group_manager.zone",
+                &self.gce_instance_group_manager_zone,
+            ),
+            ("k8s.cluster.name", &self.k8s_cluster_name),
+            ("faas.name", &self.faas_name),
+            ("faas.version", &self.faas_version),
+            ("faas.instance", &self.faas_instance),
+        ];
+        let mut attributes = vec![("cloud.provider", "gcp")];
+        attributes.push(("cloud.account.id", self.cloud_account_id.as_str()));
+        attributes.extend(
+            optional
+                .into_iter()
+                .filter_map(|(key, value)| Some((key, value.as_deref()?))),
+        );
+        attributes
+    }
+}
+
 pub const CLOUD_PLATFORM_COMPUTE_ENGINE: &str = "gcp_compute_engine";
 pub const CLOUD_PLATFORM_KUBERNETES_ENGINE: &str = "gcp_kubernetes_engine";
 pub const CLOUD_PLATFORM_CLOUD_RUN: &str = "gcp_cloud_run";
@@ -704,8 +785,6 @@ mod tests {
 
     use std::collections::HashMap;
     use std::env::VarError;
-
-    use opentelemetry_stackdriver::MonitoredResource;
 
     #[tokio::test]
     async fn cloud_platform_gke() {
@@ -930,6 +1009,60 @@ mod tests {
         );
         assert_eq!(attrs.k8s_cluster_name, None);
         assert_eq!(attrs.faas_name, None);
+    }
+
+    #[tokio::test]
+    async fn attributes_are_semconv_keyed() {
+        let getter = ResourceAttributesGetter {
+            metadata_client: FakeMetadataClient::new(&[]),
+            env_getter: |_| Err(VarError::NotPresent),
+        };
+        let attrs = detect_resource_attributes(&getter).await.unwrap();
+        assert_eq!(
+            attrs.attributes(),
+            vec![
+                ("cloud.provider", "gcp"),
+                ("cloud.account.id", "my-project"),
+                ("cloud.platform", "gcp_compute_engine"),
+                ("cloud.region", "us-central1"),
+                ("cloud.availability_zone", "us-central1-a"),
+                ("host.id", "1234567891"),
+                ("host.name", "my-instance"),
+                ("host.type", "projects/1234567890/machineTypes/e2-medium"),
+                ("gcp.gce.instance.name", "my-instance"),
+                (
+                    "gcp.gce.instance.hostname",
+                    "my-instance.us-central1-a.c.my-project.internal"
+                ),
+            ]
+        );
+    }
+
+    #[cfg(feature = "opentelemetry")]
+    #[tokio::test]
+    async fn attributes_into_otel_resource() {
+        use opentelemetry::{Key, KeyValue, Value};
+
+        let getter = ResourceAttributesGetter {
+            metadata_client: FakeMetadataClient::new(&[]),
+            env_getter: |_| Err(VarError::NotPresent),
+        };
+        let attrs = detect_resource_attributes(&getter).await.unwrap();
+
+        let key_values = Vec::<KeyValue>::from(&attrs);
+        assert_eq!(key_values.len(), attrs.attributes().len());
+
+        let resource = opentelemetry_sdk::Resource::from(&attrs);
+        assert_eq!(
+            resource.get(&Key::from_static_str("cloud.provider")),
+            Some(Value::from("gcp"))
+        );
+        assert_eq!(
+            resource.get(&Key::from_static_str("host.id")),
+            Some(Value::from("1234567891"))
+        );
+        // Undetected fields must not reach the resource.
+        assert_eq!(resource.get(&Key::from_static_str("faas.name")), None);
     }
 
     #[tokio::test]
