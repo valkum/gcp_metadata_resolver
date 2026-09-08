@@ -8,8 +8,9 @@
 //! (Compute Engine, GKE, Cloud Run, Cloud Functions, App Engine) and exposes
 //! two complementary APIs:
 //!
-//! - [`detected_resource`] returns a [`MonitoredResource`] for use with the
-//!   [Cloud Trace / Stackdriver exporter][opentelemetry-stackdriver].
+//! - [`detected_resource`] returns a [`MonitoredResource`], the GCP monitored
+//!   resource type and labels that the Cloud Logging and Cloud Monitoring APIs
+//!   accept.
 //! - [`resource_attributes`] returns [`GcpResourceAttributes`], a typed struct
 //!   of [OpenTelemetry semantic convention] resource attributes suitable for
 //!   any OTLP exporter (e.g. [GCP Managed Prometheus via OTLP]).
@@ -53,6 +54,8 @@
 //! [GCP Managed Prometheus via OTLP]: https://docs.cloud.google.com/stackdriver/docs/otlp-metrics/overview
 //! [Go GCP resource detector]: https://pkg.go.dev/go.opentelemetry.io/contrib/detectors/gcp
 //! [OTel Collector GCP processor]: https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/processor/resourcedetectionprocessor/internal/gcp
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
 use std::env::{self, VarError};
 use std::fs::File;
 use std::io::Read;
@@ -62,20 +65,31 @@ use std::time::Duration;
 use async_once_cell::OnceCell;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::{client::legacy::Client, rt::TokioExecutor};
-use opentelemetry_stackdriver::MonitoredResource;
 use thiserror::Error;
 
 mod metadata;
 use metadata::{HttpMetadataClient, MetadataClient};
 
+mod monitored_resource;
+pub use monitored_resource::MonitoredResource;
+
 /// Detects the [`MonitoredResource`] for the current GCP environment.
 ///
-/// Returns a Stackdriver-typed resource for use with the
-/// [`opentelemetry-stackdriver`](https://crates.io/crates/opentelemetry-stackdriver)
-/// Cloud Trace exporter. The result is cached; subsequent calls return the
-/// same value without re-querying the metadata server.
+/// Use [`MonitoredResource::resource_type`] and [`MonitoredResource::labels`]
+/// to get the flat [`google.api.MonitoredResource`] form, or match on the
+/// variant to build whatever your client needs. The result is cached;
+/// subsequent calls return the same value without re-querying the metadata
+/// server.
+///
+/// With the `stackdriver` feature, [`From`] converts the result into
+/// [`opentelemetry_stackdriver::MonitoredResource`]. That crate is
+/// [deprecated], so the feature is off by default.
 ///
 /// For OTLP exporters (metrics, logs), prefer [`resource_attributes`] instead.
+///
+/// [deprecated]: https://github.com/open-telemetry/opentelemetry-rust-contrib/issues/609
+/// [`google.api.MonitoredResource`]: https://cloud.google.com/logging/docs/reference/v2/rest/v2/MonitoredResource
+/// [`opentelemetry_stackdriver::MonitoredResource`]: https://docs.rs/opentelemetry-stackdriver/latest/opentelemetry_stackdriver/enum.MonitoredResource.html
 ///
 /// # Errors
 ///
@@ -704,8 +718,6 @@ mod tests {
 
     use std::collections::HashMap;
     use std::env::VarError;
-
-    use opentelemetry_stackdriver::MonitoredResource;
 
     #[tokio::test]
     async fn cloud_platform_gke() {
