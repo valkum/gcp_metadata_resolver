@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the `google.api.MonitoredResource` form.
 - Add the optional `stackdriver` feature. It converts `MonitoredResource` into
   `opentelemetry_stackdriver::MonitoredResource`.
+- Add `GcpResourceAttributes::attributes()`. It returns the populated
+  attributes, keyed by semantic convention name.
+- Add the optional `opentelemetry` feature. It converts
+  `GcpResourceAttributes` into `Vec<KeyValue>` and into
+  `opentelemetry_sdk::Resource`.
 
 ### Changed
 
