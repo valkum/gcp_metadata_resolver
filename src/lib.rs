@@ -243,6 +243,11 @@ impl<C: MetadataClient> ResourceAttributesGetter<C> {
     async fn metadata(&self, path: &str) -> Option<String> {
         match self.metadata_client.resolve(path).await {
             Ok(body) => Some(body.trim().to_string()),
+            // Detection probes keys that are absent on most platforms.
+            Err(err @ metadata::Error::NotDefined(_)) => {
+                tracing::debug!(?err, "Metadata key {} is not defined", path);
+                None
+            }
             Err(err) => {
                 tracing::error!(?err, "Failed to get metadata from {}", path);
                 None
