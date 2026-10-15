@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `DetectError` implements `Clone`.
+
+### Changed
+
+- `detected_resource()` and `resource_attributes()` share one platform
+  detection, and detection sends independent metadata requests together.
+- `detected_resource()` caches its first verdict, also when it is an error.
+  Before, it ran detection again after an error. The documentation now states
+  that both functions cache the first verdict for the life of the process.
+- An empty environment variable or metadata value is now absent. Before, a
+  label or an attribute got the empty string, e.g. `K_SERVICE=""` gave
+  `Some("")`.
+
+### Fixed
+
+- Trim the DMI product name. Before, the trailing newline stopped the App
+  Engine and Cloud Functions fast path from matching.
+- Log a metadata key that is not defined at `debug` level, not at `error`
+  level. Detection probes keys that are absent on most platforms.
+- Take the GKE namespace from `NAMESPACE_NAME` also when the service account
+  file is not present.
+
 ## [0.5.1](https://github.com/valkum/gcp_metadata_resolver/compare/v0.5.0...v0.5.1) - 2026-10-15
 
 ### Other
