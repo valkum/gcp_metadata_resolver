@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/valkum/gcp_metadata_resolver/compare/v0.5.1...v0.6.0) - 2026-10-15
+
+### Added
+
+- *(otel)* [**breaking**] add one feature per OpenTelemetry version
+- *(detect)* return the global resource for an unknown platform
+
+### Fixed
+
+- *(detect)* retry the first probe on a host that suggests GCP
+- *(metadata)* log a key that is not defined at debug level
+- *(detect)* trim the DMI product name
+
+### Other
+
+- *(changelog)* describe the detection changes
+- *(detect)* cache the first verdict and document it
+- *(metadata)* describe what the ETag is for
+- *(deps)* enable the tokio time feature
+- *(detect)* run independent metadata requests together
+- *(detect)* detect the platform once
+- *(detect)* treat empty metadata and env values as absent
+
 ### Added
 
 - `DetectError` implements `Clone`.
