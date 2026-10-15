@@ -82,6 +82,9 @@ pub enum MonitoredResource {
         version_id: Option<String>,
         zone: Option<String>,
     },
+    /// A resource that is not on a known platform: `global`. The metadata
+    /// server answers, but no platform matches.
+    Global { project_id: String },
 }
 
 impl MonitoredResource {
@@ -104,6 +107,7 @@ impl MonitoredResource {
             Self::CloudRunJob { .. } => "cloud_run_job",
             Self::CloudFunction { .. } => "cloud_function",
             Self::AppEngine { .. } => "gae_app",
+            Self::Global { .. } => "global",
         }
     }
 
@@ -115,7 +119,8 @@ impl MonitoredResource {
             | Self::CloudRunRevision { project_id, .. }
             | Self::CloudRunJob { project_id, .. }
             | Self::CloudFunction { project_id, .. }
-            | Self::AppEngine { project_id, .. } => project_id,
+            | Self::AppEngine { project_id, .. }
+            | Self::Global { project_id } => project_id,
         }
     }
 
@@ -188,6 +193,7 @@ impl MonitoredResource {
                 labels.extend(version_id.as_deref().map(|v| ("version_id", v)));
                 labels.extend(zone.as_deref().map(|v| ("zone", v)));
             }
+            Self::Global { .. } => {}
         }
         labels
     }
@@ -266,6 +272,7 @@ impl From<MonitoredResource> for opentelemetry_stackdriver::MonitoredResource {
                 version_id,
                 zone,
             },
+            MonitoredResource::Global { project_id } => Self::Global { project_id },
         }
     }
 }
@@ -342,6 +349,12 @@ mod tests {
                     zone: None,
                 },
                 "gae_app",
+            ),
+            (
+                MonitoredResource::Global {
+                    project_id: "my-project".to_owned(),
+                },
+                "global",
             ),
         ];
         for (resource, expected) in cases {
@@ -488,6 +501,32 @@ mod tests {
             } if project_id == "my-project"
                 && instance_id.as_deref() == Some("1234")
                 && zone.as_deref() == Some("us-central1-a")
+        ));
+    }
+
+    #[test]
+    fn labels_global() {
+        let resource = MonitoredResource::Global {
+            project_id: "my-project".to_owned(),
+        };
+        assert_eq!(
+            resource.labels(),
+            BTreeMap::from([("project_id", "my-project")])
+        );
+    }
+
+    #[cfg(feature = "stackdriver")]
+    #[test]
+    #[allow(deprecated)]
+    fn into_stackdriver_global() {
+        let resource: opentelemetry_stackdriver::MonitoredResource = MonitoredResource::Global {
+            project_id: "my-project".to_owned(),
+        }
+        .into();
+        assert!(matches!(
+            resource,
+            opentelemetry_stackdriver::MonitoredResource::Global { project_id }
+                if project_id == "my-project"
         ));
     }
 
