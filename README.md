@@ -91,7 +91,7 @@ Which `GcpResourceAttributes` fields are populated depends on the detected platf
 | `cloud_account_id` | x | x | x | x | x | x |
 | `cloud_platform` | x | x | x | x | x | x |
 | `cloud_region` | x | x | x | x | x | x |
-| `cloud_availability_zone` | x | x | | | | x |
+| `cloud_availability_zone` | x | x† | | | | x |
 | `host_id` | x | x | | | | |
 | `host_name` | x | x | | | | |
 | `host_type` | x | x | | | | |
@@ -104,6 +104,10 @@ Which `GcpResourceAttributes` fields are populated depends on the detected platf
 | `faas_instance` | | | x | x | x | x |
 
 *\* MIG fields are only set when the instance belongs to a managed instance group.*
+
+*† On GKE, the location comes only from the `cluster-location` instance
+attribute, never from the node zone. `cloud_availability_zone` is only set
+for zonal clusters. Regional clusters (e.g. Autopilot) set only `cloud_region`.*
 
 ## License
 
