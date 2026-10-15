@@ -15,6 +15,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(deps)* bump actions-rust-lang/setup-rust-toolchain
 - *(deps)* bump release-plz/action from 0.5.130 to 0.5.141
 
+### Fixed
+
+- On GKE, take `cloud.region` and `cloud.availability_zone` only from the
+  `cluster-location` instance attribute. Before, a regional cluster also got
+  the node zone in `cloud.availability_zone`. Cloud Logging fills the
+  `location` label from `cloud.availability_zone` first, so logs from a
+  regional cluster (e.g. Autopilot) had the node zone, not the cluster region.
+- A `cluster-location` in an unknown format now sets neither field.
+
+## [0.5.0](https://github.com/valkum/gcp_metadata_resolver/compare/v0.4.0...v0.5.0) - 2026-10-15
+
 ### Added
 
 - Add `MonitoredResource`, a GCP monitored resource type that this crate owns.
@@ -41,12 +52,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Make the metadata server URL in the documentation a hyperlink. It failed the
   `rustdoc::bare_urls` lint.
-- On GKE, take `cloud.region` and `cloud.availability_zone` only from the
-  `cluster-location` instance attribute. Before, a regional cluster also got
-  the node zone in `cloud.availability_zone`. Cloud Logging fills the
-  `location` label from `cloud.availability_zone` first, so logs from a
-  regional cluster (e.g. Autopilot) had the node zone, not the cluster region.
-- A `cluster-location` in an unknown format now sets neither field.
 
 ## [0.4.0](https://github.com/valkum/gcp_metadata_resolver/compare/v0.3.2...v0.4.0) - 2026-05-19
 
