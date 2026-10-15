@@ -86,6 +86,9 @@ mod otel;
 /// to get the flat [`google.api.MonitoredResource`] form, or match on the
 /// variant to build whatever your client needs.
 ///
+/// If the metadata server answers but no known platform matches, the result
+/// is [`MonitoredResource::Global`].
+///
 /// The first verdict that completes is cached for the life of the process.
 /// This includes a failure: later calls return the same error and do not
 /// query the metadata server again. If a call is dropped before it completes,
@@ -105,7 +108,7 @@ mod otel;
 /// # Errors
 ///
 /// Returns [`DetectError`] if the metadata server is unreachable or the
-/// platform could not be identified.
+/// project ID is not available.
 pub async fn detected_resource() -> Result<&'static MonitoredResource, DetectError> {
     DETECTED_RESOURCE
         .get_or_init(async { build_resource(detector(), detection().await).await })
@@ -268,7 +271,9 @@ async fn build_resource<C: MetadataClient>(
             detect_kubernetes_resource(getter, project_id()?, cluster_name).await
         }
         Platform::ComputeEngine => detect_compute_engine_resource(getter, project_id()?).await,
-        Platform::Unknown => return Err(DetectError::DetectionFailed),
+        Platform::Unknown => MonitoredResource::Global {
+            project_id: project_id()?,
+        },
     })
 }
 
@@ -967,6 +972,21 @@ mod tests {
         };
         let result = detect_resource(&getter).await;
         assert!(matches!(result, Err(DetectError::DetectionFailed)));
+    }
+
+    #[tokio::test]
+    async fn unknown_platform_is_global() {
+        let getter = ResourceAttributesGetter {
+            metadata_client: FakeMetadataClient::new(&[("instance/preempted", "")]),
+            env_getter: |_| Err(VarError::NotPresent),
+        };
+        let resource = detect_resource(&getter).await.unwrap();
+        assert_eq!(
+            resource,
+            MonitoredResource::Global {
+                project_id: "my-project".to_owned()
+            }
+        );
     }
 
     #[tokio::test]

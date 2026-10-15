@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `DetectError` implements `Clone`.
+- Add `MonitoredResource::Global`, the `global` resource type. It has only
+  `project_id`.
 
 ### Changed
 
@@ -18,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `detected_resource()` caches its first verdict, also when it is an error.
   Before, it ran detection again after an error. The documentation now states
   that both functions cache the first verdict for the life of the process.
+- `detected_resource()` returns `MonitoredResource::Global` when the metadata
+  server answers but no known platform matches. Before, it returned
+  `DetectError::DetectionFailed`.
 - An empty environment variable or metadata value is now absent. Before, a
   label or an attribute got the empty string, e.g. `K_SERVICE=""` gave
   `Some("")`.
