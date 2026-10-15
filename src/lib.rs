@@ -102,7 +102,7 @@ mod otel;
 /// platform could not be identified.
 pub async fn detected_resource() -> Result<&'static MonitoredResource, DetectError> {
     DETECTED_RESOURCE
-        .get_or_try_init(async { build_resource(detector(), platform().await).await })
+        .get_or_try_init(async { build_resource(detector(), detection().await).await })
         .await
 }
 
@@ -143,7 +143,7 @@ pub async fn instance_id() -> Option<String> {
 /// [Google Telemetry API]: https://cloud.google.com/stackdriver/docs/reference/telemetry/v1.metrics
 pub async fn resource_attributes() -> Option<&'static GcpResourceAttributes> {
     DETECTED_ATTRIBUTES
-        .get_or_init(async { build_resource_attributes(detector(), platform().await).await })
+        .get_or_init(async { build_resource_attributes(detector(), detection().await).await })
         .await
         .as_ref()
 }
@@ -171,20 +171,37 @@ enum Platform {
     Unknown,
 }
 
-/// Detects the platform. Returns `None` if the metadata server does not answer.
-async fn detect_platform<C: MetadataClient>(
-    getter: &ResourceAttributesGetter<C>,
-) -> Option<Platform> {
+/// The result of platform detection.
+#[derive(Debug)]
+struct Detection {
+    platform: Platform,
+    project_id: Option<String>,
+}
+
+/// Detects the platform and the project ID. Returns `None` if the metadata
+/// server does not answer.
+async fn detect<C: MetadataClient>(getter: &ResourceAttributesGetter<C>) -> Option<Detection> {
+    // Probe first, so that a host that is not GCP sends one request only.
     if !getter.is_metadata_active().await {
         return None;
     }
+    let (platform, project_id) =
+        tokio::join!(detect_platform(getter), getter.metadata_project_id());
+    Some(Detection {
+        platform,
+        project_id,
+    })
+}
+
+/// Detects the platform of a host where the metadata server answers.
+async fn detect_platform<C: MetadataClient>(getter: &ResourceAttributesGetter<C>) -> Platform {
     // Fast path
     match system_product_name().as_deref() {
-        Some("Google App Engine") => return Some(Platform::AppEngine),
-        Some("Google Cloud Functions") => return Some(Platform::CloudFunction),
+        Some("Google App Engine") => return Platform::AppEngine,
+        Some("Google Cloud Functions") => return Platform::CloudFunction,
         _ => {}
     }
-    let platform = if getter.is_app_engine() {
+    if getter.is_app_engine() {
         Platform::AppEngine
     } else if getter.is_cloud_function() {
         Platform::CloudFunction
@@ -192,23 +209,20 @@ async fn detect_platform<C: MetadataClient>(
         Platform::CloudRunService
     } else if getter.is_cloud_run_job() {
         Platform::CloudRunJob
-    } else if let Some(cluster_name) = getter.kubernetes_cluster_name().await {
-        Platform::KubernetesEngine { cluster_name }
-    } else if getter.is_compute_engine().await {
-        Platform::ComputeEngine
     } else {
-        Platform::Unknown
-    };
-    Some(platform)
+        // Probe GKE and GCE together to save one round trip.
+        match tokio::join!(getter.kubernetes_cluster_name(), getter.is_compute_engine()) {
+            (Some(cluster_name), _) => Platform::KubernetesEngine { cluster_name },
+            (None, true) => Platform::ComputeEngine,
+            (None, false) => Platform::Unknown,
+        }
+    }
 }
 
-/// Returns the platform of this process. The result is cached and shared by
-/// [`detected_resource`] and [`resource_attributes`].
-async fn platform() -> Option<&'static Platform> {
-    DETECTED_PLATFORM
-        .get_or_init(detect_platform(detector()))
-        .await
-        .as_ref()
+/// Returns the detection for this process. The result is cached and shared
+/// by [`detected_resource`] and [`resource_attributes`].
+async fn detection() -> Option<&'static Detection> {
+    DETECTION.get_or_init(detect(detector())).await.as_ref()
 }
 
 /// Detect the environment using the given getter
@@ -216,25 +230,33 @@ async fn platform() -> Option<&'static Platform> {
 async fn detect_resource<C: MetadataClient>(
     getter: &ResourceAttributesGetter<C>,
 ) -> Result<MonitoredResource, DetectError> {
-    build_resource(getter, detect_platform(getter).await.as_ref()).await
+    build_resource(getter, detect(getter).await.as_ref()).await
 }
 
 async fn build_resource<C: MetadataClient>(
     getter: &ResourceAttributesGetter<C>,
-    platform: Option<&Platform>,
+    detection: Option<&Detection>,
 ) -> Result<MonitoredResource, DetectError> {
-    let resource = match platform {
-        None | Some(Platform::Unknown) => return Err(DetectError::DetectionFailed),
-        Some(Platform::AppEngine) => detect_app_engine_resource(getter).await,
-        Some(Platform::CloudFunction) => detect_cloud_function_resource(getter).await,
-        Some(Platform::CloudRunService) => detect_cloud_run_service_resource(getter).await,
-        Some(Platform::CloudRunJob) => detect_cloud_run_job_resource(getter).await,
-        Some(Platform::KubernetesEngine { cluster_name }) => {
-            detect_kubernetes_resource(getter, cluster_name).await
-        }
-        Some(Platform::ComputeEngine) => detect_compute_engine_resource(getter).await,
+    let Some(detection) = detection else {
+        return Err(DetectError::DetectionFailed);
     };
-    resource.ok_or(DetectError::NoProjectId)
+    let project_id = || detection.project_id.clone().ok_or(DetectError::NoProjectId);
+    Ok(match &detection.platform {
+        Platform::AppEngine => {
+            // App Engine also takes the project ID from the environment.
+            let project_id =
+                project_id().or_else(|err| getter.env("GOOGLE_CLOUD_PROJECT").ok_or(err))?;
+            detect_app_engine_resource(getter, project_id).await
+        }
+        Platform::CloudFunction => detect_cloud_function_resource(getter, project_id()?).await,
+        Platform::CloudRunService => detect_cloud_run_service_resource(getter, project_id()?).await,
+        Platform::CloudRunJob => detect_cloud_run_job_resource(getter, project_id()?).await,
+        Platform::KubernetesEngine { cluster_name } => {
+            detect_kubernetes_resource(getter, project_id()?, cluster_name).await
+        }
+        Platform::ComputeEngine => detect_compute_engine_resource(getter, project_id()?).await,
+        Platform::Unknown => return Err(DetectError::DetectionFailed),
+    })
 }
 
 /// Reads resource type on the Linux-based environments such as
@@ -361,74 +383,71 @@ impl Default for ResourceAttributesGetter<HttpMetadataClient> {
 
 async fn detect_app_engine_resource<C: MetadataClient>(
     getter: &ResourceAttributesGetter<C>,
-) -> Option<MonitoredResource> {
-    let project_id = match getter.metadata_project_id().await {
-        Some(project_id) => project_id,
-        None => getter.env("GOOGLE_CLOUD_PROJECT")?,
-    };
+    project_id: String,
+) -> MonitoredResource {
     let zone = getter.metadata_zone().await;
     let module_id = getter
         .env("GAE_SERVICE")
         .or_else(|| getter.env("GAE_MODULE_NAME"));
     let version_id = getter.env("GAE_VERSION");
 
-    Some(MonitoredResource::AppEngine {
+    MonitoredResource::AppEngine {
         project_id,
         module_id,
         version_id,
         zone,
-    })
+    }
 }
 
 async fn detect_cloud_function_resource<C: MetadataClient>(
     getter: &ResourceAttributesGetter<C>,
-) -> Option<MonitoredResource> {
-    let project_id = getter.metadata_project_id().await?;
+    project_id: String,
+) -> MonitoredResource {
     let region = getter.metadata_region().await;
     // This used to be FUNCTION_NAME, but that seems to be legacy.
     let function_name = getter.env("K_SERVICE");
-    Some(MonitoredResource::CloudFunction {
+    MonitoredResource::CloudFunction {
         project_id,
         region,
         function_name,
-    })
+    }
 }
 
 async fn detect_cloud_run_service_resource<C: MetadataClient>(
     getter: &ResourceAttributesGetter<C>,
-) -> Option<MonitoredResource> {
-    let project_id = getter.metadata_project_id().await?;
+    project_id: String,
+) -> MonitoredResource {
     let location = getter.metadata_region().await;
     let service_name = getter.env("K_SERVICE");
     let revision_name = getter.env("K_REVISION");
     let configuration_name = getter.env("K_CONFIGURATION");
-    Some(MonitoredResource::CloudRunRevision {
+    MonitoredResource::CloudRunRevision {
         project_id,
         location,
         service_name,
         revision_name,
         configuration_name,
-    })
+    }
 }
 
 async fn detect_cloud_run_job_resource<C: MetadataClient>(
     getter: &ResourceAttributesGetter<C>,
-) -> Option<MonitoredResource> {
-    let project_id = getter.metadata_project_id().await?;
+    project_id: String,
+) -> MonitoredResource {
     let location = getter.metadata_region().await;
     let job_name = getter.env("CLOUD_RUN_JOB");
-    Some(MonitoredResource::CloudRunJob {
+    MonitoredResource::CloudRunJob {
         project_id,
         location,
         job_name,
-    })
+    }
 }
 
 async fn detect_kubernetes_resource<C: MetadataClient>(
     getter: &ResourceAttributesGetter<C>,
+    project_id: String,
     cluster_name: &str,
-) -> Option<MonitoredResource> {
-    let project_id = getter.metadata_project_id().await?;
+) -> MonitoredResource {
     let location = getter
         .metadata("instance/attributes/cluster-location")
         .await;
@@ -441,44 +460,43 @@ async fn detect_kubernetes_resource<C: MetadataClient>(
     let pod_name = getter.env("HOSTNAME");
     // there is no way to derive container name from within container; use custom envvar if available
     let container_name = getter.env("CONTAINER_NAME");
-    Some(MonitoredResource::KubernetesEngine {
+    MonitoredResource::KubernetesEngine {
         project_id,
         cluster_name: Some(cluster_name.to_owned()),
         location,
         namespace_name,
         pod_name,
         container_name,
-    })
+    }
 }
 
 async fn detect_compute_engine_resource<C: MetadataClient>(
     getter: &ResourceAttributesGetter<C>,
-) -> Option<MonitoredResource> {
-    let project_id = getter.metadata_project_id().await?;
+    project_id: String,
+) -> MonitoredResource {
     let (instance_id, zone) = tokio::join!(getter.metadata("instance/id"), getter.metadata_zone());
-    Some(MonitoredResource::ComputeEngine {
+    MonitoredResource::ComputeEngine {
         project_id,
         instance_id,
         zone,
-    })
+    }
 }
 
 #[cfg(test)]
 async fn detect_resource_attributes<C: MetadataClient>(
     getter: &ResourceAttributesGetter<C>,
 ) -> Option<GcpResourceAttributes> {
-    build_resource_attributes(getter, detect_platform(getter).await.as_ref()).await
+    build_resource_attributes(getter, detect(getter).await.as_ref()).await
 }
 
 async fn build_resource_attributes<C: MetadataClient>(
     getter: &ResourceAttributesGetter<C>,
-    platform: Option<&Platform>,
+    detection: Option<&Detection>,
 ) -> Option<GcpResourceAttributes> {
-    let platform = platform?;
-    let cloud_account_id = getter.metadata_project_id().await?;
-    let mut attrs = GcpResourceAttributes::new(cloud_account_id);
+    let detection = detection?;
+    let mut attrs = GcpResourceAttributes::new(detection.project_id.clone()?);
 
-    match platform {
+    match &detection.platform {
         Platform::AppEngine => detect_app_engine_attrs(getter, &mut attrs).await,
         Platform::CloudFunction => detect_cloud_function_attrs(getter, &mut attrs).await,
         Platform::CloudRunService => detect_cloud_run_service_attrs(getter, &mut attrs).await,
@@ -498,10 +516,10 @@ async fn detect_cloud_run_service_attrs<C: MetadataClient>(
     attrs: &mut GcpResourceAttributes,
 ) {
     attrs.cloud_platform = Some(CLOUD_PLATFORM_CLOUD_RUN.to_owned());
-    attrs.cloud_region = getter.metadata_region().await;
+    (attrs.cloud_region, attrs.faas_instance) =
+        tokio::join!(getter.metadata_region(), getter.metadata_instance_id());
     attrs.faas_name = getter.env("K_SERVICE");
     attrs.faas_version = getter.env("K_REVISION");
-    attrs.faas_instance = getter.metadata_instance_id().await;
 }
 
 async fn detect_cloud_run_job_attrs<C: MetadataClient>(
@@ -509,9 +527,9 @@ async fn detect_cloud_run_job_attrs<C: MetadataClient>(
     attrs: &mut GcpResourceAttributes,
 ) {
     attrs.cloud_platform = Some(CLOUD_PLATFORM_CLOUD_RUN.to_owned());
-    attrs.cloud_region = getter.metadata_region().await;
+    (attrs.cloud_region, attrs.faas_instance) =
+        tokio::join!(getter.metadata_region(), getter.metadata_instance_id());
     attrs.faas_name = getter.env("CLOUD_RUN_JOB");
-    attrs.faas_instance = getter.metadata_instance_id().await;
 }
 
 async fn detect_gce_attrs<C: MetadataClient>(
@@ -609,10 +627,10 @@ async fn detect_cloud_function_attrs<C: MetadataClient>(
     attrs: &mut GcpResourceAttributes,
 ) {
     attrs.cloud_platform = Some(CLOUD_PLATFORM_CLOUD_FUNCTIONS.to_owned());
-    attrs.cloud_region = getter.metadata_region().await;
+    (attrs.cloud_region, attrs.faas_instance) =
+        tokio::join!(getter.metadata_region(), getter.metadata_instance_id());
     attrs.faas_name = getter.env("K_SERVICE");
     attrs.faas_version = getter.env("FUNCTION_TARGET");
-    attrs.faas_instance = getter.metadata_instance_id().await;
 }
 
 /// Resource attributes for a detected GCP environment.
@@ -795,7 +813,7 @@ fn read_trimmed(path: &str) -> Option<String> {
 
 static DETECTOR: OnceLock<ResourceAttributesGetter<HttpMetadataClient>> = OnceLock::new();
 static DETECTED_ATTRIBUTES: OnceCell<Option<GcpResourceAttributes>> = OnceCell::new();
-static DETECTED_PLATFORM: OnceCell<Option<Platform>> = OnceCell::new();
+static DETECTION: OnceCell<Option<Detection>> = OnceCell::new();
 static DETECTED_RESOURCE: OnceCell<MonitoredResource> = OnceCell::new();
 static MIG_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(r"^projects/[^/]+/(zones|regions)/([^/]+)/instanceGroupManagers/([^/]+)$")
@@ -861,28 +879,28 @@ mod tests {
         };
         assert_eq!(
             detect_platform(&gke).await,
-            Some(Platform::KubernetesEngine {
+            Platform::KubernetesEngine {
                 cluster_name: "my-cluster".to_owned()
-            })
+            }
         );
 
         let gce = ResourceAttributesGetter {
             metadata_client: FakeMetadataClient::new(&[]),
             env_getter: |_| Err(VarError::NotPresent),
         };
-        assert_eq!(detect_platform(&gce).await, Some(Platform::ComputeEngine));
+        assert_eq!(detect_platform(&gce).await, Platform::ComputeEngine);
 
         let unknown = ResourceAttributesGetter {
             metadata_client: FakeMetadataClient::new(&[("instance/preempted", "")]),
             env_getter: |_| Err(VarError::NotPresent),
         };
-        assert_eq!(detect_platform(&unknown).await, Some(Platform::Unknown));
+        assert_eq!(detect_platform(&unknown).await, Platform::Unknown);
 
         let inactive = ResourceAttributesGetter {
             metadata_client: FailingMetadataClient,
             env_getter: |_| Err(VarError::NotPresent),
         };
-        assert_eq!(detect_platform(&inactive).await, None);
+        assert!(detect(&inactive).await.is_none());
     }
 
     #[tokio::test]
@@ -895,10 +913,7 @@ mod tests {
                 _ => Err(VarError::NotPresent),
             },
         };
-        assert_eq!(
-            detect_platform(&getter).await,
-            Some(Platform::CloudFunction)
-        );
+        assert_eq!(detect_platform(&getter).await, Platform::CloudFunction);
     }
 
     #[test]
