@@ -102,28 +102,20 @@ mod otel;
 /// platform could not be identified.
 pub async fn detected_resource() -> Result<&'static MonitoredResource, DetectError> {
     DETECTED_RESOURCE
-        .get_or_try_init(detect_resource(
-            DETECTOR.get_or_init(ResourceAttributesGetter::default),
-        ))
+        .get_or_try_init(detect_resource(detector()))
         .await
 }
 
 /// Returns the GCP project ID from the [metadata server](https://cloud.google.com/compute/docs/metadata/predefined-metadata-keys),
 /// or `None` if unavailable.
 pub async fn project_id() -> Option<String> {
-    DETECTOR
-        .get_or_init(ResourceAttributesGetter::default)
-        .metadata_project_id()
-        .await
+    detector().metadata_project_id().await
 }
 
 /// Returns the GCE instance ID from the [metadata server](https://cloud.google.com/compute/docs/metadata/predefined-metadata-keys),
 /// or `None` if unavailable.
 pub async fn instance_id() -> Option<String> {
-    DETECTOR
-        .get_or_init(ResourceAttributesGetter::default)
-        .metadata_instance_id()
-        .await
+    detector().metadata_instance_id().await
 }
 
 /// Returns [OpenTelemetry resource attributes] for the detected GCP environment.
@@ -151,9 +143,7 @@ pub async fn instance_id() -> Option<String> {
 /// [Google Telemetry API]: https://cloud.google.com/stackdriver/docs/reference/telemetry/v1.metrics
 pub async fn resource_attributes() -> Option<&'static GcpResourceAttributes> {
     DETECTED_ATTRIBUTES
-        .get_or_init(detect_resource_attributes(
-            DETECTOR.get_or_init(ResourceAttributesGetter::default),
-        ))
+        .get_or_init(detect_resource_attributes(detector()))
         .await
         .as_ref()
 }
@@ -240,9 +230,10 @@ struct ResourceAttributesGetter<C> {
 }
 
 impl<C: MetadataClient> ResourceAttributesGetter<C> {
+    /// Returns a metadata value, or `None` if it is absent or empty.
     async fn metadata(&self, path: &str) -> Option<String> {
         match self.metadata_client.resolve(path).await {
-            Ok(body) => Some(body.trim().to_string()),
+            Ok(body) => non_empty(body.trim()),
             // Detection probes keys that are absent on most platforms.
             Err(err @ metadata::Error::NotDefined(_)) => {
                 tracing::debug!(?err, "Metadata key {} is not defined", path);
@@ -263,12 +254,13 @@ impl<C: MetadataClient> ResourceAttributesGetter<C> {
         self.metadata("instance/id").await
     }
 
+    /// Returns an environment variable, or `None` if it is unset or empty.
+    fn env(&self, key: &str) -> Option<String> {
+        (self.env_getter)(key).ok().filter(|v| !v.is_empty())
+    }
+
     async fn metadata_zone(&self) -> Option<String> {
-        let zone = self.metadata("instance/zone").await.unwrap_or_default();
-        if !zone.is_empty() {
-            return zone.rsplit_once('/').map(|(_, zone)| zone.to_owned());
-        }
-        None
+        last_segment(&self.metadata("instance/zone").await?)
     }
 
     async fn metadata_instance_name(&self) -> Option<String> {
@@ -284,47 +276,35 @@ impl<C: MetadataClient> ResourceAttributesGetter<C> {
     }
 
     async fn metadata_region(&self) -> Option<String> {
-        let region = self.metadata("instance/region").await.unwrap_or_default();
-        if !region.is_empty() {
-            return region.rsplit_once('/').map(|(_, region)| region.to_owned());
-        }
-        None
+        last_segment(&self.metadata("instance/region").await?)
     }
 
     async fn is_metadata_active(&self) -> bool {
-        self.metadata("").await.unwrap_or_default() != ""
+        self.metadata("").await.is_some()
     }
 
     fn is_app_engine(&self) -> bool {
-        let service = (self.env_getter)("GAE_SERVICE").unwrap_or_default();
-        let version = (self.env_getter)("GAE_VERSION").unwrap_or_default();
-        let instance = (self.env_getter)("GAE_INSTANCE").unwrap_or_default();
-        !service.is_empty() && !version.is_empty() && !instance.is_empty()
+        ["GAE_SERVICE", "GAE_VERSION", "GAE_INSTANCE"]
+            .iter()
+            .all(|key| self.env(key).is_some())
     }
 
     fn is_cloud_function(&self) -> bool {
-        (self.env_getter)("FUNCTION_TARGET").is_ok_and(|v| !v.is_empty())
+        self.env("FUNCTION_TARGET").is_some()
     }
 
     fn is_cloud_run_service(&self) -> bool {
-        let has_config = (self.env_getter)("K_CONFIGURATION").is_ok_and(|v| !v.is_empty());
-        let has_function_target = (self.env_getter)("FUNCTION_TARGET").is_ok_and(|v| !v.is_empty());
-        has_config && !has_function_target
+        self.env("K_CONFIGURATION").is_some() && self.env("FUNCTION_TARGET").is_none()
     }
 
     fn is_cloud_run_job(&self) -> bool {
-        (self.env_getter)("CLOUD_RUN_JOB").is_ok_and(|v| !v.is_empty())
+        self.env("CLOUD_RUN_JOB").is_some()
     }
 
     async fn is_kubernetes_engine(&self) -> bool {
-        let cluster_name = self
-            .metadata("instance/attributes/cluster-name")
+        self.metadata("instance/attributes/cluster-name")
             .await
-            .unwrap_or_default();
-        if cluster_name.is_empty() {
-            return false;
-        }
-        true
+            .is_some()
     }
 
     async fn is_compute_engine(&self) -> bool {
@@ -333,9 +313,7 @@ impl<C: MetadataClient> ResourceAttributesGetter<C> {
             self.metadata("instance/cpu-platform"),
             self.metadata("instance/attributes/gae_app_bucket")
         );
-        preempted.unwrap_or_default() != ""
-            && platform.unwrap_or_default() != ""
-            && app_bucket.unwrap_or_default() == ""
+        preempted.is_some() && platform.is_some() && app_bucket.is_none()
     }
 }
 
@@ -357,20 +335,15 @@ impl Default for ResourceAttributesGetter<HttpMetadataClient> {
 async fn detect_app_engine_resource<C: MetadataClient>(
     getter: &ResourceAttributesGetter<C>,
 ) -> Option<MonitoredResource> {
-    // We are not sure if the metadata service can return an empty string
-    // for project ID. Thus, we do some unergonormic string base work here.
-    let mut project_id = getter.metadata_project_id().await.unwrap_or_default();
-    if project_id.is_empty() {
-        project_id = (getter.env_getter)("GOOGLE_CLOUD_PROJECT").unwrap_or_default();
-    }
-    if project_id.is_empty() {
-        return None;
-    }
+    let project_id = match getter.metadata_project_id().await {
+        Some(project_id) => project_id,
+        None => getter.env("GOOGLE_CLOUD_PROJECT")?,
+    };
     let zone = getter.metadata_zone().await;
-    let module_id = (getter.env_getter)("GAE_SERVICE")
-        .ok()
-        .or_else(|| (getter.env_getter)("GAE_MODULE_NAME").ok());
-    let version_id = (getter.env_getter)("GAE_VERSION").ok();
+    let module_id = getter
+        .env("GAE_SERVICE")
+        .or_else(|| getter.env("GAE_MODULE_NAME"));
+    let version_id = getter.env("GAE_VERSION");
 
     Some(MonitoredResource::AppEngine {
         project_id,
@@ -383,13 +356,10 @@ async fn detect_app_engine_resource<C: MetadataClient>(
 async fn detect_cloud_function_resource<C: MetadataClient>(
     getter: &ResourceAttributesGetter<C>,
 ) -> Option<MonitoredResource> {
-    let project_id = getter.metadata_project_id().await.unwrap_or_default();
-    if project_id.is_empty() {
-        return None;
-    }
+    let project_id = getter.metadata_project_id().await?;
     let region = getter.metadata_region().await;
     // This used to be FUNCTION_NAME, but that seems to be legacy.
-    let function_name = (getter.env_getter)("K_SERVICE").ok();
+    let function_name = getter.env("K_SERVICE");
     Some(MonitoredResource::CloudFunction {
         project_id,
         region,
@@ -400,14 +370,11 @@ async fn detect_cloud_function_resource<C: MetadataClient>(
 async fn detect_cloud_run_service_resource<C: MetadataClient>(
     getter: &ResourceAttributesGetter<C>,
 ) -> Option<MonitoredResource> {
-    let project_id = getter.metadata_project_id().await.unwrap_or_default();
-    if project_id.is_empty() {
-        return None;
-    }
+    let project_id = getter.metadata_project_id().await?;
     let location = getter.metadata_region().await;
-    let service_name = (getter.env_getter)("K_SERVICE").ok();
-    let revision_name = (getter.env_getter)("K_REVISION").ok();
-    let configuration_name = (getter.env_getter)("K_CONFIGURATION").ok();
+    let service_name = getter.env("K_SERVICE");
+    let revision_name = getter.env("K_REVISION");
+    let configuration_name = getter.env("K_CONFIGURATION");
     Some(MonitoredResource::CloudRunRevision {
         project_id,
         location,
@@ -420,12 +387,9 @@ async fn detect_cloud_run_service_resource<C: MetadataClient>(
 async fn detect_cloud_run_job_resource<C: MetadataClient>(
     getter: &ResourceAttributesGetter<C>,
 ) -> Option<MonitoredResource> {
-    let project_id = getter.metadata_project_id().await.unwrap_or_default();
-    if project_id.is_empty() {
-        return None;
-    }
+    let project_id = getter.metadata_project_id().await?;
     let location = getter.metadata_region().await;
-    let job_name = (getter.env_getter)("CLOUD_RUN_JOB").ok();
+    let job_name = getter.env("CLOUD_RUN_JOB");
     Some(MonitoredResource::CloudRunJob {
         project_id,
         location,
@@ -436,26 +400,21 @@ async fn detect_cloud_run_job_resource<C: MetadataClient>(
 async fn detect_kubernetes_resource<C: MetadataClient>(
     getter: &ResourceAttributesGetter<C>,
 ) -> Option<MonitoredResource> {
-    let project_id = getter.metadata_project_id().await.unwrap_or_default();
-    if project_id.is_empty() {
-        return None;
-    }
+    let project_id = getter.metadata_project_id().await?;
 
     let (cluster_name, location) = tokio::join!(
         getter.metadata("instance/attributes/cluster-name"),
         getter.metadata("instance/attributes/cluster-location")
     );
-    let mut namespace_name =
-        read_trimmed("/var/run/secrets/kubernetes.io/serviceaccount/namespace");
-    if namespace_name.as_deref() == Some("") {
-        // if automountServiceAccountToken is disabled allow to customize
-        // the namespace via environment
-        namespace_name = (getter.env_getter)("NAMESPACE_NAME").ok();
-    }
+    // if automountServiceAccountToken is disabled allow to customize
+    // the namespace via environment
+    let namespace_name = read_trimmed("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+        .filter(|namespace| !namespace.is_empty())
+        .or_else(|| getter.env("NAMESPACE_NAME"));
     // note: if deployment customizes hostname, HOSTNAME envvar will have invalid content
-    let pod_name = (getter.env_getter)("HOSTNAME").ok();
+    let pod_name = getter.env("HOSTNAME");
     // there is no way to derive container name from within container; use custom envvar if available
-    let container_name = (getter.env_getter)("CONTAINER_NAME").ok();
+    let container_name = getter.env("CONTAINER_NAME");
     Some(MonitoredResource::KubernetesEngine {
         project_id,
         cluster_name,
@@ -469,10 +428,7 @@ async fn detect_kubernetes_resource<C: MetadataClient>(
 async fn detect_compute_engine_resource<C: MetadataClient>(
     getter: &ResourceAttributesGetter<C>,
 ) -> Option<MonitoredResource> {
-    let project_id = getter.metadata_project_id().await.unwrap_or_default();
-    if project_id.is_empty() {
-        return None;
-    }
+    let project_id = getter.metadata_project_id().await?;
     let (instance_id, zone) = tokio::join!(getter.metadata("instance/id"), getter.metadata_zone());
     Some(MonitoredResource::ComputeEngine {
         project_id,
@@ -490,24 +446,7 @@ async fn detect_resource_attributes<C: MetadataClient>(
 
     let cloud_account_id = getter.metadata_project_id().await?;
 
-    let mut attrs = GcpResourceAttributes {
-        cloud_account_id,
-        cloud_platform: None,
-        cloud_region: None,
-        cloud_availability_zone: None,
-        host_id: None,
-        host_name: None,
-        host_type: None,
-        gce_instance_name: None,
-        gce_instance_hostname: None,
-        gce_instance_group_manager_name: None,
-        gce_instance_group_manager_region: None,
-        gce_instance_group_manager_zone: None,
-        k8s_cluster_name: None,
-        faas_name: None,
-        faas_version: None,
-        faas_instance: None,
-    };
+    let mut attrs = GcpResourceAttributes::new(cloud_account_id);
 
     // Fast path via system product name
     match system_product_name().as_deref() {
@@ -529,13 +468,13 @@ async fn detect_resource_attributes<C: MetadataClient>(
     } else if getter.is_cloud_run_service() {
         attrs.cloud_platform = Some(CLOUD_PLATFORM_CLOUD_RUN.to_owned());
         attrs.cloud_region = getter.metadata_region().await;
-        attrs.faas_name = (getter.env_getter)("K_SERVICE").ok();
-        attrs.faas_version = (getter.env_getter)("K_REVISION").ok();
+        attrs.faas_name = getter.env("K_SERVICE");
+        attrs.faas_version = getter.env("K_REVISION");
         attrs.faas_instance = getter.metadata_instance_id().await;
     } else if getter.is_cloud_run_job() {
         attrs.cloud_platform = Some(CLOUD_PLATFORM_CLOUD_RUN.to_owned());
         attrs.cloud_region = getter.metadata_region().await;
-        attrs.faas_name = (getter.env_getter)("CLOUD_RUN_JOB").ok();
+        attrs.faas_name = getter.env("CLOUD_RUN_JOB");
         attrs.faas_instance = getter.metadata_instance_id().await;
     } else if getter.is_kubernetes_engine().await {
         detect_gke_attrs(getter, &mut attrs).await;
@@ -629,11 +568,11 @@ async fn detect_app_engine_attrs<C: MetadataClient>(
         attrs.cloud_region = zone_to_region(&zone).map(str::to_owned);
         attrs.cloud_availability_zone = Some(zone);
     }
-    attrs.faas_name = (getter.env_getter)("GAE_SERVICE")
-        .ok()
-        .or_else(|| (getter.env_getter)("GAE_MODULE_NAME").ok());
-    attrs.faas_version = (getter.env_getter)("GAE_VERSION").ok();
-    attrs.faas_instance = (getter.env_getter)("GAE_INSTANCE").ok();
+    attrs.faas_name = getter
+        .env("GAE_SERVICE")
+        .or_else(|| getter.env("GAE_MODULE_NAME"));
+    attrs.faas_version = getter.env("GAE_VERSION");
+    attrs.faas_instance = getter.env("GAE_INSTANCE");
 }
 
 async fn detect_cloud_function_attrs<C: MetadataClient>(
@@ -642,8 +581,8 @@ async fn detect_cloud_function_attrs<C: MetadataClient>(
 ) {
     attrs.cloud_platform = Some(CLOUD_PLATFORM_CLOUD_FUNCTIONS.to_owned());
     attrs.cloud_region = getter.metadata_region().await;
-    attrs.faas_name = (getter.env_getter)("K_SERVICE").ok();
-    attrs.faas_version = (getter.env_getter)("FUNCTION_TARGET").ok();
+    attrs.faas_name = getter.env("K_SERVICE");
+    attrs.faas_version = getter.env("FUNCTION_TARGET");
     attrs.faas_instance = getter.metadata_instance_id().await;
 }
 
@@ -711,6 +650,27 @@ pub struct GcpResourceAttributes {
 }
 
 impl GcpResourceAttributes {
+    fn new(cloud_account_id: String) -> Self {
+        Self {
+            cloud_account_id,
+            cloud_platform: None,
+            cloud_region: None,
+            cloud_availability_zone: None,
+            host_id: None,
+            host_name: None,
+            host_type: None,
+            gce_instance_name: None,
+            gce_instance_hostname: None,
+            gce_instance_group_manager_name: None,
+            gce_instance_group_manager_region: None,
+            gce_instance_group_manager_zone: None,
+            k8s_cluster_name: None,
+            faas_name: None,
+            faas_version: None,
+            faas_instance: None,
+        }
+    }
+
     /// Returns the populated attributes, keyed by [semantic convention] name.
     ///
     /// Fields that were not detected are absent. `cloud.provider` is always
@@ -780,6 +740,19 @@ pub const CLOUD_PLATFORM_CLOUD_RUN: &str = "gcp_cloud_run";
 pub const CLOUD_PLATFORM_CLOUD_FUNCTIONS: &str = "gcp_cloud_functions";
 pub const CLOUD_PLATFORM_APP_ENGINE: &str = "gcp_app_engine";
 
+fn non_empty(value: &str) -> Option<String> {
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+/// Returns the last segment of a path such as `projects/123/zones/us-central1-a`.
+fn last_segment(path: &str) -> Option<String> {
+    path.rsplit_once('/').map(|(_, segment)| segment.to_owned())
+}
+
+fn detector() -> &'static ResourceAttributesGetter<HttpMetadataClient> {
+    DETECTOR.get_or_init(ResourceAttributesGetter::default)
+}
+
 fn zone_to_region(zone: &str) -> Option<&str> {
     zone.rsplit_once('-').map(|(region, _)| region)
 }
@@ -832,6 +805,36 @@ mod tests {
         };
         let resource = detect_resource(&getter).await.unwrap();
         assert!(matches!(resource, MonitoredResource::ComputeEngine { .. }));
+    }
+
+    #[tokio::test]
+    async fn cloud_platform_empty_cluster_name_is_not_gke() {
+        let getter = ResourceAttributesGetter {
+            metadata_client: FakeMetadataClient::new(&[("instance/attributes/cluster-name", "\n")]),
+            env_getter: |key| match key {
+                "K_CONFIGURATION" => Ok(String::new()),
+                _ => Err(VarError::NotPresent),
+            },
+        };
+        let resource = detect_resource(&getter).await.unwrap();
+        assert!(matches!(resource, MonitoredResource::ComputeEngine { .. }));
+    }
+
+    #[tokio::test]
+    async fn app_engine_project_id_from_env() {
+        let getter = ResourceAttributesGetter {
+            metadata_client: FakeMetadataClient::new(&[("project/project-id", "")]),
+            env_getter: |key| match key {
+                "GAE_SERVICE" => Ok("default".into()),
+                "GAE_VERSION" => Ok("v1".into()),
+                "GAE_INSTANCE" => Ok("instance-1".into()),
+                "GOOGLE_CLOUD_PROJECT" => Ok("env-project".into()),
+                _ => Err(VarError::NotPresent),
+            },
+        };
+        let resource = detect_resource(&getter).await.unwrap();
+        assert!(matches!(resource, MonitoredResource::AppEngine { .. }));
+        assert_eq!(resource.project_id(), "env-project");
     }
 
     #[tokio::test]
