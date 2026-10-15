@@ -35,6 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   level. Detection probes keys that are absent on most platforms.
 - Take the GKE namespace from `NAMESPACE_NAME` also when the service account
   file is not present.
+- Try the metadata server again, up to 3 times over about 3.5 s, when the DMI
+  product name starts with `Google`. On GKE with Workload Identity, the
+  metadata server can refuse connections for the first seconds of a pod, and
+  detection then cached a failure.
 
 ## [0.5.1](https://github.com/valkum/gcp_metadata_resolver/compare/v0.5.0...v0.5.1) - 2026-10-15
 

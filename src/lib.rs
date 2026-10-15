@@ -95,6 +95,12 @@ mod otel;
 /// for example by a timeout, the next call starts detection again. The crate
 /// is meant for startup, where the environment does not change.
 ///
+/// When the DMI product name starts with `Google`, for example in a GKE pod,
+/// detection tries the metadata server up to 3 more times over about 3.5 s
+/// before it gives up. On GKE with Workload Identity, the metadata server can
+/// refuse connections for the first seconds of a pod. On other hosts, the
+/// first failure ends detection.
+///
 /// With the `stackdriver` feature, [`From`] converts the result into
 /// [`opentelemetry_stackdriver::MonitoredResource`]. That crate is
 /// [deprecated], so the feature is off by default.
@@ -194,10 +200,14 @@ struct Detection {
 }
 
 /// Detects the platform and the project ID. Returns `None` if the metadata
-/// server does not answer.
-async fn detect<C: MetadataClient>(getter: &ResourceAttributesGetter<C>) -> Option<Detection> {
+/// server does not answer. `backoff` sets the wait before each retry of the
+/// first probe.
+async fn detect<C: MetadataClient>(
+    getter: &ResourceAttributesGetter<C>,
+    backoff: &[Duration],
+) -> Option<Detection> {
     // Probe first, so that a host that is not GCP sends one request only.
-    if !getter.is_metadata_active().await {
+    if !probe_metadata_server(getter, backoff).await {
         return None;
     }
     let (platform, project_id) =
@@ -206,6 +216,31 @@ async fn detect<C: MetadataClient>(getter: &ResourceAttributesGetter<C>) -> Opti
         platform,
         project_id,
     })
+}
+
+/// Returns `true` if the metadata server answers. Waits for each `backoff`
+/// entry and tries again after a failure.
+async fn probe_metadata_server<C: MetadataClient>(
+    getter: &ResourceAttributesGetter<C>,
+    backoff: &[Duration],
+) -> bool {
+    if getter.is_metadata_active().await {
+        return true;
+    }
+    for &delay in backoff {
+        tracing::debug!("Metadata server did not answer, retry in {delay:?}");
+        tokio::time::sleep(delay).await;
+        if getter.is_metadata_active().await {
+            return true;
+        }
+    }
+    false
+}
+
+/// Returns `true` if the DMI product name starts with `Google`, like
+/// `systemInfoSuggestsGCE` of the Go client. This is also true in a GKE pod.
+fn system_suggests_gcp() -> bool {
+    system_product_name().is_some_and(|name| name.starts_with("Google"))
 }
 
 /// Detects the platform of a host where the metadata server answers.
@@ -237,8 +272,20 @@ async fn detect_platform<C: MetadataClient>(getter: &ResourceAttributesGetter<C>
 /// Returns the detection for this process. The first verdict is cached, also
 /// when it is `None`, and [`detected_resource`] and [`resource_attributes`]
 /// share it.
+///
+/// On GKE with Workload Identity, the metadata server can refuse connections
+/// for the first seconds of a pod. So when the host suggests GCP, the first
+/// probe is tried again before detection gives up.
 async fn detection() -> Option<&'static Detection> {
-    DETECTION.get_or_init(detect(detector())).await.as_ref()
+    let backoff: &[Duration] = if system_suggests_gcp() {
+        &PROBE_BACKOFF
+    } else {
+        &[]
+    };
+    DETECTION
+        .get_or_init(detect(detector(), backoff))
+        .await
+        .as_ref()
 }
 
 /// Detect the environment using the given getter
@@ -246,7 +293,7 @@ async fn detection() -> Option<&'static Detection> {
 async fn detect_resource<C: MetadataClient>(
     getter: &ResourceAttributesGetter<C>,
 ) -> Result<MonitoredResource, DetectError> {
-    build_resource(getter, detect(getter).await.as_ref()).await
+    build_resource(getter, detect(getter, &[]).await.as_ref()).await
 }
 
 async fn build_resource<C: MetadataClient>(
@@ -504,7 +551,7 @@ async fn detect_compute_engine_resource<C: MetadataClient>(
 async fn detect_resource_attributes<C: MetadataClient>(
     getter: &ResourceAttributesGetter<C>,
 ) -> Option<GcpResourceAttributes> {
-    build_resource_attributes(getter, detect(getter).await.as_ref()).await
+    build_resource_attributes(getter, detect(getter, &[]).await.as_ref()).await
 }
 
 async fn build_resource_attributes<C: MetadataClient>(
@@ -829,6 +876,13 @@ fn read_trimmed(path: &str) -> Option<String> {
         .map(|s| s.trim().to_owned())
 }
 
+/// The wait before each retry of the first probe on a host that suggests GCP.
+const PROBE_BACKOFF: [Duration; 3] = [
+    Duration::from_millis(500),
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+];
+
 static DETECTOR: OnceLock<ResourceAttributesGetter<HttpMetadataClient>> = OnceLock::new();
 static DETECTED_ATTRIBUTES: OnceCell<Option<GcpResourceAttributes>> = OnceCell::new();
 static DETECTION: OnceCell<Option<Detection>> = OnceCell::new();
@@ -918,7 +972,7 @@ mod tests {
             metadata_client: FailingMetadataClient,
             env_getter: |_| Err(VarError::NotPresent),
         };
-        assert!(detect(&inactive).await.is_none());
+        assert!(detect(&inactive, &[]).await.is_none());
     }
 
     #[tokio::test]
@@ -1147,6 +1201,80 @@ mod tests {
         async fn resolve(&self, suffix: &str) -> Result<String, MetadataError> {
             Err(MetadataError::NotDefined(suffix.to_owned()))
         }
+    }
+
+    /// A metadata client whose first `failures` requests time out, like a
+    /// GKE metadata server that is not ready yet.
+    struct StartingMetadataClient {
+        failures: usize,
+        requests: std::sync::atomic::AtomicUsize,
+        inner: FakeMetadataClient,
+    }
+
+    impl StartingMetadataClient {
+        fn new(failures: usize) -> Self {
+            Self {
+                failures,
+                requests: Default::default(),
+                inner: FakeMetadataClient::new(&[]),
+            }
+        }
+
+        fn requests(&self) -> usize {
+            self.requests.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl MetadataClient for StartingMetadataClient {
+        async fn resolve_etag(
+            &self,
+            suffix: &str,
+        ) -> Result<(String, Option<String>), MetadataError> {
+            let request = self
+                .requests
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if request < self.failures {
+                return Err(MetadataError::RequestTimeout);
+            }
+            self.inner.resolve_etag(suffix).await
+        }
+
+        async fn resolve(&self, suffix: &str) -> Result<String, MetadataError> {
+            let (body, _) = self.resolve_etag(suffix).await?;
+            Ok(body)
+        }
+    }
+
+    const TEST_BACKOFF: [Duration; 3] = [Duration::from_millis(1); 3];
+
+    #[tokio::test]
+    async fn probe_retries_until_metadata_server_answers() {
+        let getter = ResourceAttributesGetter {
+            metadata_client: StartingMetadataClient::new(2),
+            env_getter: |_| Err(VarError::NotPresent),
+        };
+        assert!(probe_metadata_server(&getter, &TEST_BACKOFF).await);
+        assert_eq!(getter.metadata_client.requests(), 3);
+    }
+
+    #[tokio::test]
+    async fn probe_gives_up_after_backoff() {
+        let getter = ResourceAttributesGetter {
+            metadata_client: StartingMetadataClient::new(usize::MAX),
+            env_getter: |_| Err(VarError::NotPresent),
+        };
+        assert!(!probe_metadata_server(&getter, &TEST_BACKOFF).await);
+        assert_eq!(getter.metadata_client.requests(), 4);
+    }
+
+    #[tokio::test]
+    async fn probe_without_backoff_sends_one_request() {
+        let getter = ResourceAttributesGetter {
+            metadata_client: StartingMetadataClient::new(1),
+            env_getter: |_| Err(VarError::NotPresent),
+        };
+        assert!(!probe_metadata_server(&getter, &[]).await);
+        assert_eq!(getter.metadata_client.requests(), 1);
     }
 
     #[tokio::test]
