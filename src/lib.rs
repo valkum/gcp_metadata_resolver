@@ -49,8 +49,10 @@
 //! Unlike the reference Go detector (which is stateless and expects the SDK to
 //! cache the resulting `Resource`), this crate caches the underlying metadata
 //! client so repeated calls to [`project_id`], [`instance_id`], etc. reuse the
-//! same HTTP connection pool. [`detected_resource`] additionally caches its
-//! result via an async once-cell.
+//! same HTTP connection pool. [`detected_resource`] and
+//! [`resource_attributes`] also cache their first verdict for the life of the
+//! process, also when detection fails. Like the Python detector, the crate is
+//! meant to describe the environment at startup.
 //!
 //! [GCE metadata server]: https://docs.cloud.google.com/compute/docs/metadata/overview
 //! [opentelemetry-stackdriver]: https://crates.io/crates/opentelemetry-stackdriver
@@ -82,9 +84,13 @@ mod otel;
 ///
 /// Use [`MonitoredResource::resource_type`] and [`MonitoredResource::labels`]
 /// to get the flat [`google.api.MonitoredResource`] form, or match on the
-/// variant to build whatever your client needs. The result is cached;
-/// subsequent calls return the same value without re-querying the metadata
-/// server.
+/// variant to build whatever your client needs.
+///
+/// The first verdict that completes is cached for the life of the process.
+/// This includes a failure: later calls return the same error and do not
+/// query the metadata server again. If a call is dropped before it completes,
+/// for example by a timeout, the next call starts detection again. The crate
+/// is meant for startup, where the environment does not change.
 ///
 /// With the `stackdriver` feature, [`From`] converts the result into
 /// [`opentelemetry_stackdriver::MonitoredResource`]. That crate is
@@ -102,8 +108,10 @@ mod otel;
 /// platform could not be identified.
 pub async fn detected_resource() -> Result<&'static MonitoredResource, DetectError> {
     DETECTED_RESOURCE
-        .get_or_try_init(async { build_resource(detector(), detection().await).await })
+        .get_or_init(async { build_resource(detector(), detection().await).await })
         .await
+        .as_ref()
+        .map_err(Clone::clone)
 }
 
 /// Returns the GCP project ID from the [metadata server](https://cloud.google.com/compute/docs/metadata/predefined-metadata-keys),
@@ -128,6 +136,10 @@ pub async fn instance_id() -> Option<String> {
 /// Returns `None` when the [metadata server] is unreachable or the project
 /// ID cannot be determined (e.g. local development).
 ///
+/// Like [`detected_resource`], this caches the first verdict for the life of
+/// the process, also when it is `None`. Both functions share one platform
+/// detection.
+///
 /// When sending metrics to the [Google Telemetry API] `v1.metrics` endpoint, the
 /// `prometheus_target` monitored resource requires `location` (mapped from
 /// `location`, [`cloud.availability_zone`][GcpResourceAttributes::cloud_availability_zone],
@@ -148,7 +160,7 @@ pub async fn resource_attributes() -> Option<&'static GcpResourceAttributes> {
         .as_ref()
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum DetectError {
     #[error("Failed to detect projectId")]
     NoProjectId,
@@ -219,8 +231,9 @@ async fn detect_platform<C: MetadataClient>(getter: &ResourceAttributesGetter<C>
     }
 }
 
-/// Returns the detection for this process. The result is cached and shared
-/// by [`detected_resource`] and [`resource_attributes`].
+/// Returns the detection for this process. The first verdict is cached, also
+/// when it is `None`, and [`detected_resource`] and [`resource_attributes`]
+/// share it.
 async fn detection() -> Option<&'static Detection> {
     DETECTION.get_or_init(detect(detector())).await.as_ref()
 }
@@ -814,7 +827,7 @@ fn read_trimmed(path: &str) -> Option<String> {
 static DETECTOR: OnceLock<ResourceAttributesGetter<HttpMetadataClient>> = OnceLock::new();
 static DETECTED_ATTRIBUTES: OnceCell<Option<GcpResourceAttributes>> = OnceCell::new();
 static DETECTION: OnceCell<Option<Detection>> = OnceCell::new();
-static DETECTED_RESOURCE: OnceCell<MonitoredResource> = OnceCell::new();
+static DETECTED_RESOURCE: OnceCell<Result<MonitoredResource, DetectError>> = OnceCell::new();
 static MIG_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(r"^projects/[^/]+/(zones|regions)/([^/]+)/instanceGroupManagers/([^/]+)$")
         .unwrap()
