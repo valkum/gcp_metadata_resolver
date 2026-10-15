@@ -25,7 +25,8 @@ jobs:
       - name: Check each feature alone
         run: |
           cargo check --no-default-features --features stackdriver --workspace
-          cargo check --no-default-features --features opentelemetry --workspace
+          cargo check --no-default-features --features opentelemetry_0_32 --workspace
+          cargo check --no-default-features --features opentelemetry_0_33 --workspace
 
   rustfmt:
     name: Rustfmt

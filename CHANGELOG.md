@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking**: replace the `opentelemetry` feature with one feature per
+  OpenTelemetry version: `opentelemetry_0_32` and `opentelemetry_0_33`. The
+  features are additive. Use `opentelemetry_0_32` to keep the old behavior.
+  Support for a new OpenTelemetry version is now a new feature, not a
+  breaking change.
 - `detected_resource()` and `resource_attributes()` share one platform
   detection, and detection sends independent metadata requests together.
 - `detected_resource()` caches its first verdict, also when it is an error.

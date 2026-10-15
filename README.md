@@ -36,7 +36,7 @@ let labels: HashMap<String, String> = resource
 App Engine: it has no `gae_app` and uses `gae_instance`, which takes different labels. For metrics, prefer
 `resource_attributes()` and an OTLP exporter.
 
-### `opentelemetry` feature
+### `opentelemetry_0_*` features
 
 `resource_attributes()` gives the attributes that the
 [Google Telemetry API](https://docs.cloud.google.com/stackdriver/docs/reference/telemetry/overview) uses to derive
@@ -49,10 +49,11 @@ for (key, value) in attrs.attributes() { // ("cloud.platform", "gcp_compute_engi
 }
 ```
 
-Enable the `opentelemetry` feature to get the SDK types directly:
+Enable the feature for your OpenTelemetry version to get the SDK types directly. The crate supports
+`opentelemetry_0_32` and `opentelemetry_0_33`. The features are additive, so you can enable more than one:
 
 ```toml
-gcp_metadata_resolver = { version = "0.5", features = ["opentelemetry"] }
+gcp_metadata_resolver = { version = "0.6", features = ["opentelemetry_0_33"] }
 ```
 
 ```rust

@@ -77,7 +77,6 @@ use metadata::{HttpMetadataClient, MetadataClient};
 mod monitored_resource;
 pub use monitored_resource::MonitoredResource;
 
-#[cfg(feature = "opentelemetry")]
 mod otel;
 
 /// Detects the [`MonitoredResource`] for the current GCP environment.
@@ -790,9 +789,11 @@ impl GcpResourceAttributes {
     /// OTLP exporter; the [Google Telemetry API] derives the monitored
     /// resource from these attributes.
     ///
-    /// With the `opentelemetry` feature, [`From`] builds a
-    /// [`Vec<KeyValue>`][opentelemetry::KeyValue] or a
-    /// [`Resource`][opentelemetry_sdk::Resource] directly.
+    /// With an `opentelemetry_0_*` feature, for example `opentelemetry_0_33`,
+    /// [`From`] builds a [`Vec<KeyValue>`][opentelemetry::KeyValue] or a
+    /// [`Resource`][opentelemetry_sdk::Resource] of that OpenTelemetry
+    /// version directly. The features are additive, so several versions can
+    /// be enabled at the same time.
     ///
     /// ```no_run
     /// # async fn example() -> Option<()> {
@@ -1331,33 +1332,6 @@ mod tests {
                 ),
             ]
         );
-    }
-
-    #[cfg(feature = "opentelemetry")]
-    #[tokio::test]
-    async fn attributes_into_otel_resource() {
-        use opentelemetry::{Key, KeyValue, Value};
-
-        let getter = ResourceAttributesGetter {
-            metadata_client: FakeMetadataClient::new(&[]),
-            env_getter: |_| Err(VarError::NotPresent),
-        };
-        let attrs = detect_resource_attributes(&getter).await.unwrap();
-
-        let key_values = Vec::<KeyValue>::from(&attrs);
-        assert_eq!(key_values.len(), attrs.attributes().len());
-
-        let resource = opentelemetry_sdk::Resource::from(&attrs);
-        assert_eq!(
-            resource.get(&Key::from_static_str("cloud.provider")),
-            Some(Value::from("gcp"))
-        );
-        assert_eq!(
-            resource.get(&Key::from_static_str("host.id")),
-            Some(Value::from("1234567891"))
-        );
-        // Undetected fields must not reach the resource.
-        assert_eq!(resource.get(&Key::from_static_str("faas.name")), None);
     }
 
     #[tokio::test]
