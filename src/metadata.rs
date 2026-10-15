@@ -12,6 +12,10 @@ use tokio::time::timeout;
 #[allow(async_fn_in_trait)]
 pub trait MetadataClient {
     /// Returns a value from the metadata service as well as the associated ETag.
+    ///
+    /// Detection does not use the ETag. The Go client uses it in `Subscribe`
+    /// to watch a value: it sends `?wait_for_change=true&last_etag=<etag>`
+    /// and the server answers when the value changes.
     async fn resolve_etag(&self, suffix: &str) -> Result<(String, Option<String>), Error>;
 
     /// Returns a value from the metadata service.
