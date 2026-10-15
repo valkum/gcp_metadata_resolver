@@ -61,8 +61,6 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 use std::env::{self, VarError};
-use std::fs::File;
-use std::io::Read;
 use std::sync::{LazyLock, OnceLock};
 use std::time::Duration;
 
@@ -225,22 +223,11 @@ async fn detect_resource<C: MetadataClient>(
 /// Reads resource type on the Linux-based environments such as
 // Cloud Functions, Cloud Run, GKE, GCE, GAE, etc.
 fn system_product_name() -> Option<String> {
-    #[cfg(not(target_os = "linux"))]
-    return None;
-
-    #[cfg(target_os = "linux")]
-    {
-        let path = "/sys/class/dmi/id/product_name";
-        Some(
-            File::open(path)
-                .and_then(|mut file| {
-                    let mut s = String::new();
-                    file.read_to_string(&mut s)?;
-                    Ok(s)
-                })
-                .unwrap_or_else(|_| String::new()),
-        )
+    if !cfg!(target_os = "linux") {
+        return None;
     }
+    // sysfs values end with a newline, so trim before the caller matches on it.
+    read_trimmed("/sys/class/dmi/id/product_name")
 }
 
 struct ResourceAttributesGetter<C> {
@@ -453,13 +440,8 @@ async fn detect_kubernetes_resource<C: MetadataClient>(
         getter.metadata("instance/attributes/cluster-name"),
         getter.metadata("instance/attributes/cluster-location")
     );
-    let mut namespace_name = File::open("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
-        .and_then(|mut file| {
-            let mut s = String::new();
-            file.read_to_string(&mut s)?;
-            Ok(s)
-        })
-        .ok();
+    let mut namespace_name =
+        read_trimmed("/var/run/secrets/kubernetes.io/serviceaccount/namespace");
     if namespace_name.as_deref() == Some("") {
         // if automountServiceAccountToken is disabled allow to customize
         // the namespace via environment
@@ -795,6 +777,13 @@ pub const CLOUD_PLATFORM_APP_ENGINE: &str = "gcp_app_engine";
 
 fn zone_to_region(zone: &str) -> Option<&str> {
     zone.rsplit_once('-').map(|(region, _)| region)
+}
+
+/// Reads a small text file and trims surrounding whitespace.
+fn read_trimmed(path: &str) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|s| s.trim().to_owned())
 }
 
 static DETECTOR: OnceLock<ResourceAttributesGetter<HttpMetadataClient>> = OnceLock::new();
