@@ -28,7 +28,7 @@
 //! | `cloud_account_id` | x | x | x | x | x | x |
 //! | `cloud_platform` | x | x | x | x | x | x |
 //! | `cloud_region` | x | x | x | x | x | x |
-//! | `cloud_availability_zone` | x | x | | | | x |
+//! | `cloud_availability_zone` | x | x† | | | | x |
 //! | `host_id` | x | x | | | | |
 //! | `host_name` | x | x | | | | |
 //! | `host_type` | x | x | | | | |
@@ -41,6 +41,10 @@
 //! | `faas_instance` | | | x | x | x | x |
 //!
 //! *\* MIG fields are only set when the instance belongs to a managed instance group.*
+//!
+//! *† On GKE, the location comes only from the `cluster-location` instance
+//! attribute, never from the node zone. `cloud_availability_zone` is only set
+//! for zonal clusters. Regional clusters (e.g. Autopilot) set only `cloud_region`.*
 //!
 //! Unlike the reference Go detector (which is stateless and expects the SDK to
 //! cache the resulting `Resource`), this crate caches the underlying metadata
@@ -140,7 +144,8 @@ pub async fn instance_id() -> Option<String> {
 /// or [`cloud.region`][GcpResourceAttributes::cloud_region]) and `instance`
 /// (mapped from `service.instance.id`, [`host.id`][GcpResourceAttributes::host_id], or
 /// [`faas.instance`][GcpResourceAttributes::faas_instance]). Points missing
-/// either attribute are rejected.
+/// either attribute are rejected. On GKE, `location` is the cluster location:
+/// the zone of a zonal cluster or the region of a regional cluster.
 ///
 /// [OpenTelemetry resource attributes]: https://opentelemetry.io/docs/specs/semconv/resource/cloud/
 /// [Go GCP detector]: https://pkg.go.dev/go.opentelemetry.io/contrib/detectors/gcp
@@ -546,20 +551,7 @@ async fn detect_resource_attributes<C: MetadataClient>(
         attrs.faas_name = (getter.env_getter)("CLOUD_RUN_JOB").ok();
         attrs.faas_instance = getter.metadata_instance_id().await;
     } else if getter.is_kubernetes_engine().await {
-        detect_gce_attrs(getter, &mut attrs).await;
-        attrs.cloud_platform = Some(CLOUD_PLATFORM_KUBERNETES_ENGINE.to_owned());
-        attrs.k8s_cluster_name = getter.metadata("instance/attributes/cluster-name").await;
-        if let Some(location) = getter
-            .metadata("instance/attributes/cluster-location")
-            .await
-        {
-            if location.contains('-') && location.matches('-').count() == 2 {
-                attrs.cloud_region = zone_to_region(&location).map(str::to_owned);
-                attrs.cloud_availability_zone = Some(location);
-            } else {
-                attrs.cloud_region = Some(location);
-            }
-        }
+        detect_gke_attrs(getter, &mut attrs).await;
     } else if getter.is_compute_engine().await {
         detect_gce_attrs(getter, &mut attrs).await;
     }
@@ -573,19 +565,55 @@ async fn detect_gce_attrs<C: MetadataClient>(
 ) {
     attrs.cloud_platform = Some(CLOUD_PLATFORM_COMPUTE_ENGINE.to_owned());
 
-    let (zone, host_id, instance_name, hostname, machine_type, created_by) = tokio::join!(
-        getter.metadata_zone(),
+    let (zone, ()) = tokio::join!(getter.metadata_zone(), detect_gce_host_attrs(getter, attrs));
+
+    if let Some(zone) = zone {
+        attrs.cloud_region = zone_to_region(&zone).map(str::to_owned);
+        attrs.cloud_availability_zone = Some(zone);
+    }
+}
+
+/// Matches `GKEAvailabilityZoneOrRegion` of the Go detector: the location
+/// comes only from `cluster-location`, never from the node's `instance/zone`.
+/// Cloud Logging fills the `location` label from `cloud.availability_zone`
+/// first, so a node zone on a regional cluster hides the cluster region.
+async fn detect_gke_attrs<C: MetadataClient>(
+    getter: &ResourceAttributesGetter<C>,
+    attrs: &mut GcpResourceAttributes,
+) {
+    attrs.cloud_platform = Some(CLOUD_PLATFORM_KUBERNETES_ENGINE.to_owned());
+
+    let (cluster_name, location, ()) = tokio::join!(
+        getter.metadata("instance/attributes/cluster-name"),
+        getter.metadata("instance/attributes/cluster-location"),
+        detect_gce_host_attrs(getter, attrs),
+    );
+    attrs.k8s_cluster_name = cluster_name;
+
+    if let Some(location) = location {
+        match location.matches('-').count() {
+            1 => attrs.cloud_region = Some(location),
+            2 => {
+                attrs.cloud_region = zone_to_region(&location).map(str::to_owned);
+                attrs.cloud_availability_zone = Some(location);
+            }
+            _ => tracing::debug!("unrecognized format for cluster location: {location}"),
+        }
+    }
+}
+
+/// Sets the host and `gce.*` attributes of the underlying VM, but not its zone.
+async fn detect_gce_host_attrs<C: MetadataClient>(
+    getter: &ResourceAttributesGetter<C>,
+    attrs: &mut GcpResourceAttributes,
+) {
+    let (host_id, instance_name, hostname, machine_type, created_by) = tokio::join!(
         getter.metadata_instance_id(),
         getter.metadata_instance_name(),
         getter.metadata_instance_hostname(),
         getter.metadata_machine_type(),
         getter.metadata("instance/attributes/created-by"),
     );
-
-    if let Some(zone) = zone {
-        attrs.cloud_region = zone_to_region(&zone).map(str::to_owned);
-        attrs.cloud_availability_zone = Some(zone);
-    }
 
     attrs.host_id = host_id;
     attrs.host_name = instance_name.clone();
@@ -1108,11 +1136,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resource_attributes_gke() {
+    async fn resource_attributes_gke_regional() {
         let getter = ResourceAttributesGetter {
             metadata_client: FakeMetadataClient::new(&[
                 ("instance/attributes/cluster-name", "my-cluster"),
-                ("instance/attributes/cluster-location", "us-central1"),
+                (
+                    "instance/attributes/cluster-location",
+                    "northamerica-northeast1",
+                ),
+                (
+                    "instance/zone",
+                    "projects/1234567890/zones/northamerica-northeast1-a",
+                ),
             ]),
             env_getter: |_| Err(VarError::NotPresent),
         };
@@ -1121,15 +1156,19 @@ mod tests {
             attrs.cloud_platform.as_deref(),
             Some("gcp_kubernetes_engine")
         );
-        assert_eq!(attrs.cloud_region.as_deref(), Some("us-central1"));
-        // cluster-location is regional, but the instance still has a zone
         assert_eq!(
-            attrs.cloud_availability_zone.as_deref(),
-            Some("us-central1-a")
+            attrs.cloud_region.as_deref(),
+            Some("northamerica-northeast1")
         );
+        // the node zone must not hide the cluster region
+        assert_eq!(attrs.cloud_availability_zone, None);
         assert_eq!(attrs.k8s_cluster_name.as_deref(), Some("my-cluster"));
         assert_eq!(attrs.host_id.as_deref(), Some("1234567891"));
         assert_eq!(attrs.host_name.as_deref(), Some("my-instance"));
+        assert_eq!(
+            attrs.host_type.as_deref(),
+            Some("projects/1234567890/machineTypes/e2-medium")
+        );
     }
 
     #[tokio::test]
@@ -1137,7 +1176,7 @@ mod tests {
         let getter = ResourceAttributesGetter {
             metadata_client: FakeMetadataClient::new(&[
                 ("instance/attributes/cluster-name", "my-cluster"),
-                ("instance/attributes/cluster-location", "us-central1-a"),
+                ("instance/attributes/cluster-location", "us-east1-b"),
             ]),
             env_getter: |_| Err(VarError::NotPresent),
         };
@@ -1146,11 +1185,28 @@ mod tests {
             attrs.cloud_platform.as_deref(),
             Some("gcp_kubernetes_engine")
         );
-        assert_eq!(attrs.cloud_region.as_deref(), Some("us-central1"));
+        // the node is in us-central1-a; the location comes from cluster-location
+        assert_eq!(attrs.cloud_region.as_deref(), Some("us-east1"));
+        assert_eq!(attrs.cloud_availability_zone.as_deref(), Some("us-east1-b"));
+    }
+
+    #[tokio::test]
+    async fn resource_attributes_gke_malformed_location() {
+        let getter = ResourceAttributesGetter {
+            metadata_client: FakeMetadataClient::new(&[
+                ("instance/attributes/cluster-name", "my-cluster"),
+                ("instance/attributes/cluster-location", "global"),
+            ]),
+            env_getter: |_| Err(VarError::NotPresent),
+        };
+        let attrs = detect_resource_attributes(&getter).await.unwrap();
         assert_eq!(
-            attrs.cloud_availability_zone.as_deref(),
-            Some("us-central1-a")
+            attrs.cloud_platform.as_deref(),
+            Some("gcp_kubernetes_engine")
         );
+        assert_eq!(attrs.cloud_region, None);
+        assert_eq!(attrs.cloud_availability_zone, None);
+        assert_eq!(attrs.host_id.as_deref(), Some("1234567891"));
     }
 
     #[tokio::test]
