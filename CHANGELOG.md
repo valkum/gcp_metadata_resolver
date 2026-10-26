@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-rc.2](https://github.com/valkum/gcp_metadata_resolver/compare/v0.6.0-rc.1...v0.6.0-rc.2) - 2026-10-26
+
+### Other
+
+- *(deps)* bump release-plz/action from 0.5.141 to 0.5.145
+
 ## [0.6.0-rc.1](https://github.com/valkum/gcp_metadata_resolver/compare/v0.5.1...v0.6.0-rc.1) - 2026-10-15
 
 ### Added
