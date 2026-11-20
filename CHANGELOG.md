@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1](https://github.com/valkum/gcp_metadata_resolver/compare/v0.6.0...v0.6.1) - 2026-11-20
+
+### Other
+
+- *(deps)* bump actions-rust-lang/setup-rust-toolchain
+- *(deps)* bump release-plz/action from 0.5.145 to 0.5.148
+
 ## [0.6.0](https://github.com/valkum/gcp_metadata_resolver/compare/v0.6.0-rc.1...v0.6.0) - 2026-10-26
 
 ### Other
